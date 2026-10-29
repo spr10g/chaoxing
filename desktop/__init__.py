@@ -1,3 +1,3 @@
 """Desktop application; importing this package performs no network work."""
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"

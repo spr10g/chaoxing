@@ -10,12 +10,12 @@
 
 ## 下载与安装
 
-当前版本：**v0.3.0**，适用于 **Windows x64**。
+当前版本：**v0.3.1**，适用于 **Windows x64**。
 
 | 下载项 | 用途 |
 | --- | --- |
-| [Windows 程序包](https://github.com/spr10g/chaoxing/releases/download/v0.3.0/chaoxing-v0.3.0-windows-x64.zip) | 解压后直接运行 |
-| [对应源码包](https://github.com/spr10g/chaoxing/releases/download/v0.3.0/chaoxing-v0.3.0-source.zip) | 开发、阅读源码与自行构建 |
+| [Windows 程序包](https://github.com/spr10g/chaoxing/releases/download/v0.3.1/chaoxing-v0.3.1-windows-x64.zip) | 解压后直接运行 |
+| [对应源码包](https://github.com/spr10g/chaoxing/releases/download/v0.3.1/chaoxing-v0.3.1-source.zip) | 开发、阅读源码与自行构建 |
 
 1. 下载 Windows 程序包。
 2. 完整解压，保持 `学习通工作台.exe` 与 `_internal` 目录位于同一文件夹。

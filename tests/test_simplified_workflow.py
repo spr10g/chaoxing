@@ -81,6 +81,33 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(len(engine.platform.writes), 1)
         self.assertEqual(engine.platform.videos, [])
 
+    def test_adding_auto_submit_batch_does_not_change_running_draft_batch(self):
+        self.store.save_settings({'video': False, 'answer_workers': 1, 'auto_submit': False})
+        engine = self.engine(); entered, release = threading.Event(), threading.Event()
+        def answer(q, checkpoint):
+            entered.set()
+            while not release.wait(.01): checkpoint()
+            return self.success(q, checkpoint)
+        engine.ai.query = answer
+        first = self.selections(1); engine.add(first); self.assertTrue(entered.wait(2))
+        self.store.save_settings({'auto_submit': True})
+        engine.add([(first[0][0], [{'id': '1', 'title': 'second'}])])
+        release.set(); until(lambda: len(engine.platform.writes) == 2)
+        modes = {tid: submit for tid, submit, rows in engine.platform.writes}
+        self.assertFalse(next(submit for tid, submit in modes.items() if ':work-0:' in tid))
+        self.assertTrue(next(submit for tid, submit in modes.items() if ':work-1:' in tid))
+
+    def test_requeue_checks_owner_before_changing_historical_progress(self):
+        self.store.save_settings({'video': False})
+        engine = self.engine(); engine.ai.query = self.success
+        engine.start(self.selections(1)); until(lambda: not engine.busy())
+        original = next(r for r in self.store.tasks() if r['lane'] == 'answer')
+        def check(record): raise ValueError('此任务属于其他登录账号')
+        engine.platform.check_owner = check
+        with self.assertRaisesRegex(ValueError, '其他登录账号'):
+            engine.requeue([original['id']])
+        self.assertEqual(self.store.task(original['id']), original)
+
     def test_blocked_history_retry_keeps_scope_and_can_be_cancelled(self):
         self.store.save_settings({'answer': False})
         engine = self.engine(); engine.start(self.selections(1)); until(lambda: not engine.busy())

@@ -117,7 +117,7 @@ class Engine:
         for key, handler in (('video', self.run_video), ('answer', self.run_answer)):
             if s[key]:
                 self.lanes[key] = Lane(key, int(s[key + '_workers']), handler, self.state, self.task_guard, self.api_fault)
-        self.discovery = threading.Thread(target=self._discover_all, args=(copy.deepcopy(selections),), daemon=True)
+        self.discovery = threading.Thread(target=self._discover_all, args=(copy.deepcopy(selections), self.auto_submit), daemon=True)
         self.discovery.start()
 
     def _ensure_lanes(self, names):
@@ -153,9 +153,10 @@ class Engine:
             raise ValueError('请选择视频或 AI 答题')
         self._ensure_lanes(names)
         self.discovery_stop.clear()
-        self._scan_async(copy.deepcopy(selections), names)
+        self._scan_async(copy.deepcopy(selections), names, auto_submit=bool(self.store.settings['auto_submit']))
 
-    def _scan_async(self, selections, names, targets=None):
+    def _scan_async(self, selections, names, targets=None, auto_submit=None):
+        mode = self.auto_submit if auto_submit is None else auto_submit
         def scan():
             try:
                 with self.scan_lock:
@@ -163,7 +164,7 @@ class Engine:
                     for course, points in selections:
                         for point in points:
                             self._discovery_checkpoint()
-                            self._discover(course, point, allowed=names, targets=targets)
+                            self._discover(course, point, allowed=names, targets=targets, auto_submit=mode)
             except Cancelled:
                 pass
             finally:
@@ -183,6 +184,8 @@ class Engine:
         if not records:
             raise ValueError('请勾选历史任务')
         for record in records:
+            if hasattr(self.platform, 'check_owner'):
+                self.platform.check_owner(record)
             lane = self.lanes.get(record['lane'])
             if record['id'] in self.manual or (lane and record['id'] in lane.pending):
                 raise ValueError('所选任务还有请求正在结束，请稍后重新加入')
@@ -204,13 +207,14 @@ class Engine:
         if self.discovery_stop.is_set():
             raise Cancelled('章节扫描已停止')
 
-    def _discover_all(self, selections):
+    def _discover_all(self, selections, auto_submit=None):
+        mode = self.auto_submit if auto_submit is None else auto_submit
         try:
             self.platform.bind(self._discovery_checkpoint)
             for course, points in selections:
                 for point in points:
                     self._discovery_checkpoint()
-                    self._discover(course, point)
+                    self._discover(course, point, auto_submit=mode)
         except Cancelled:
             pass
         except Exception as exc:
@@ -218,7 +222,7 @@ class Engine:
         finally:
             self.emit('discovery_done', None)
 
-    def _discover(self, course, point, retry=0, allowed=None, targets=None):
+    def _discover(self, course, point, retry=0, allowed=None, targets=None, auto_submit=None):
         key = course_key(course) + ':' + str(point['id'])
         task = {'id': key + ':discovery', 'lane': 'discovery', 'course': course, 'point': point}
         previous_scan = self.store.task(task['id']) or {}
@@ -236,7 +240,7 @@ class Engine:
                 return
             if info.get('notOpen'):
                 with self.discovery_guard:
-                    self.blocked[key] = (course, point, retry, allowed, targets)
+                    self.blocked[key] = (course, point, retry, allowed, targets, auto_submit)
                 self.record(task, status='blocked', execution_state='blocked', reason='章节未开放或等待前置任务')
                 for tid in targets or ():
                     record = self.store.task(tid)
@@ -255,6 +259,14 @@ class Engine:
                         'owner': getattr(self.platform, 'uid', '')}
                 with self.lock:
                     old = self.store.task(work['id'])
+                    if old and hasattr(self.platform, 'check_owner'):
+                        try:
+                            self.platform.check_owner(old)
+                        except ValueError as exc:
+                            self.emit('error', str(exc))
+                            continue
+                    mode = old.get('auto_submit', self.auto_submit) if old and targets is not None else self.auto_submit if auto_submit is None else auto_submit
+                    work['auto_submit'] = mode
                     if limited_targets is not None and work['id'] not in limited_targets:
                         continue
                     if work['id'] in self.excluded or (old and old.get('queue_removed') and (targets is None or work['id'] not in targets)):
@@ -262,7 +274,7 @@ class Engine:
                     if old and old.get('status') in FINAL | UNCERTAIN:
                         self.record(old, execution_state='done', progress_checked_at=time.time(), queue_removed=False)
                         continue
-                    self.record(work, queue_removed=False, progress_checked_at=time.time(), job=job, info=info)
+                    self.record(work, queue_removed=False, progress_checked_at=time.time(), job=job, info=info, auto_submit=mode)
                     lane = self.lanes[lane_name]
                     if lane.cancelled.is_set():
                         self.record(work, status='failed', execution_state='failed', reason=lane.fault_reason or '本轮执行已结束，请重新加入')
@@ -304,9 +316,9 @@ class Engine:
         def work():
             self.platform.bind(self._discovery_checkpoint)
             try:
-                for course, point, retry, allowed, targets in blocked:
+                for course, point, retry, allowed, targets, auto_submit in blocked:
                     self._discovery_checkpoint()
-                    self._discover(course, point, retry + 1, allowed, targets)
+                    self._discover(course, point, retry + 1, allowed, targets, auto_submit)
             except Cancelled:
                 pass
         self.discovery = threading.Thread(target=work, daemon=True)
@@ -378,7 +390,7 @@ class Engine:
             self.record(task, rows=rows, remote_state=dirty_remote(old))
             checkpoint()
         ready = summary({'document': document, 'rows': rows})['ready']
-        auto = self.auto_submit and ready and not old.get('require_review')
+        auto = bool(task.get('auto_submit', self.auto_submit)) and ready and not old.get('require_review')
         if not auto and remote_state(self.store.task(task['id'])) == 'draft':
             return 'draft'
         return self.save_or_submit(fresh, document, rows, auto)
