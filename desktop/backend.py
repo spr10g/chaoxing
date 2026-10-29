@@ -111,7 +111,9 @@ class Platform:
             raise ValueError('题目编号缺失或重复')
         return questions
 
-    def write_work(self, task, document, rows, submit=False, allow_blank=False):
+    def write_work(self, task, document, rows, submit=True, allow_blank=False):
+        if not submit:
+            raise ValueError('草稿自动保存在本地，仅交卷时上传学习通')
         # Always use fresh platform tokens, never persist and replay an old POST form.
         fresh = self.fetch_work(task)
         if [fingerprint(q) for q in fresh['questions']] != [fingerprint(q) for q in document['questions']]:
@@ -122,11 +124,11 @@ class Platform:
             by_id = {q['id']: dict(row, question=q) for q, row in zip(fresh['questions'], rows)}
         normalized = rows_for({'document': fresh, 'rows': list(by_id.values())})
         if not any(not row['error'] for row in normalized):
-            raise FormConflict('没有校验通过的答案，不能保存或交空白测验')
+            raise FormConflict('没有格式检查通过的答案，不能交空白测验')
         if submit and not allow_blank and any(row['error'] for row in normalized):
-            raise FormConflict('该章节仍有异常题；可先保存正常题，或明确选择允许含空题交卷')
+            raise FormConflict('该测验仍有异常题；请先处理，或明确选择允许含空题交卷')
         form = {k: v for k, v in fresh.items() if k != 'questions'}
-        form['pyFlag'] = '' if submit else '1'
+        form['pyFlag'] = ''
         for question, row in zip(fresh['questions'], normalized):
             qid = question['id']
             if row.get('payload') and not row.get('error'):
@@ -149,8 +151,10 @@ class Platform:
             if submit:
                 raise SubmissionUncertain('交卷请求已发出，但未取得明确结果，请核验平台状态') from exc
             raise
+        if not isinstance(result, dict) or result.get('status') is None:
+            raise SubmissionUncertain('已发送交卷，但响应未包含明确结果，请核实交卷状态')
         if result.get('status') not in (True, 1, 'true'):
-            raise SubmissionRejected('平台拒绝保存或提交：' + str(result.get('msg', '未知原因'))[:200])
+            raise SubmissionRejected('平台拒绝交卷：' + str(result.get('msg', '未知原因'))[:200])
 
 
 

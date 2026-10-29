@@ -11,7 +11,7 @@ from unittest.mock import patch
 import test_desktop as fixtures
 from test_desktop import FakePlatform, question, until
 from desktop.backend import Platform, course_key
-from desktop.review import rows_for, summary, can_submit, remote_label
+from desktop.review import rows_for, summary, can_submit, paper_state, paper_reason
 from desktop.ui import App
 from desktop.answers import AnswerService
 
@@ -22,12 +22,12 @@ class BatchWorkflowTests(unittest.TestCase):
     engine = fixtures.DesktopTests.engine
     selections = fixtures.DesktopTests.selections
     success = fixtures.DesktopTests.success
-    def paper(self, engine, name='p1', bad=False, status='draft', course='course'):
+    def paper(self, engine, name='p1', bad=False, status='local_saved', course='course'):
         q1, q2 = question('q1'), question('q2', '另外一道题')
         rows = [{'question': q1, **self.success(q1, lambda: None)},
                 {'question': q2, 'error': '模拟失败', 'answer': '', 'source': ''} if bad else
                 {'question': q2, **self.success(q2, lambda: None)}]
-        record = {'id': name, 'lane': 'answer', 'status': status, 'remote_state': 'draft',
+        record = {'id': name, 'lane': 'answer', 'status': status, 'remote_state': 'local',
                   'course': {'courseId': course, 'clazzId': 'class', 'cpi': '1', 'title': course},
                   'point': {'id': name, 'title': name}, 'job': {'jobid': 'work-' + name},
                   'info': {}, 'document': {'questions': [q1, q2]}, 'rows': rows}
@@ -46,8 +46,11 @@ class BatchWorkflowTests(unittest.TestCase):
         b = self.selections(2)
         b[0][0]['courseId'] = 'second'
         engine.start(a + b)
-        until(lambda: len(engine.platform.writes) == 4)
-        self.assertEqual(len({tid.split(':')[0] for tid, _, _ in engine.platform.writes}), 2)
+        until(lambda: not engine.busy())
+        answers = [r for r in self.store.tasks() if r.get('lane') == 'answer']
+        self.assertEqual(len(answers), 4)
+        self.assertEqual(len({r['course']['courseId'] for r in answers}), 2)
+        self.assertEqual(engine.platform.writes, [])
 
     def test_review_other_paper_while_video_running(self):
         engine = self.engine()
@@ -72,16 +75,14 @@ class BatchWorkflowTests(unittest.TestCase):
         result = self.finish_batch(engine)
         self.assertEqual([item['result'] for item in result['items']], ['success', 'failed', 'success'])
         self.assertEqual([tid for tid, submit, rows in engine.platform.writes if submit], ['a', 'c'])
-        self.assertEqual(self.store.task('b')['status'], 'draft')
+        self.assertEqual(self.store.task('b')['status'], 'local_saved')
 
-    def test_save_normal_answers_even_when_paper_contains_error(self):
+    def test_partial_answers_remain_local_when_platform_save_is_requested(self):
         engine = self.engine()
         self.paper(engine, 'a', bad=True)
         engine.record({'id': 'a'}, remote_state='draft_old')
-        engine.batch('save', ['a'])
-        self.finish_batch(engine)
-        self.assertFalse(engine.platform.writes[0][1])
-        self.assertEqual(self.store.task('a')['remote_state'], 'draft')
+        with self.assertRaises(ValueError): engine.batch('save', ['a'])
+        self.assertEqual(engine.platform.writes, [])
         self.assertEqual(summary(self.store.task('a'))['errors'], 1)
 
     def test_partial_final_submit_requires_explicit_flag_and_sends_blank(self):
@@ -119,7 +120,7 @@ class BatchWorkflowTests(unittest.TestCase):
         self.assertEqual(record['rows'][1]['history'][-1]['error'], '模拟失败')
         self.assertTrue(record['require_review'])
         self.assertTrue(summary(record)['ready'])
-        self.assertEqual(record['remote_state'], 'draft_old')
+        self.assertEqual(record['remote_state'], 'local')
         self.assertEqual(engine.platform.writes, [])
 
     def test_remove_running_video_keeps_other_video_running_and_suppresses_rediscovery(self):
@@ -127,7 +128,7 @@ class BatchWorkflowTests(unittest.TestCase):
         self.store.save_settings({'answer': False, 'video_workers': 1})
         engine.platform.video_gate.clear()
         engine.start(self.selections(2))
-        until(lambda: engine.lanes['video'].counts().get('running') == 1)
+        until(lambda: any(r.get('lane') == 'video' and r.get('status') == 'running' for r in self.store.tasks()))
         tid = next(r['id'] for r in self.store.tasks() if r.get('lane') == 'video' and r.get('status') == 'running')
         record = self.store.task(tid)
         engine.remove_tasks([tid])
@@ -146,15 +147,16 @@ class BatchWorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.task('a')['status'], 'removed')
         self.assertEqual(len(self.store.task('a')['rows']), 2)
 
-    def test_verify_preserves_platform_draft_evidence(self):
+    def test_verify_legacy_draft_keeps_answers_locally_without_uploading(self):
         engine = self.engine()
         self.paper(engine, 'a', bad=True)
+        engine.record({'id': 'a'}, remote_state='draft')
         engine.verify('a')
         self.finish_batch(engine)
         record = self.store.task('a')
-        self.assertEqual(record['remote_state'], 'draft')
-        self.assertIn('平台草稿已保存', remote_label(record))
-        self.assertIn('任务未完成', remote_label(record))
+        self.assertEqual(record['remote_state'], 'local')
+        self.assertEqual(paper_state(record), '需处理')
+        self.assertIn('本地草稿保留', paper_reason(record))
         self.assertEqual(engine.platform.writes, [])
 
     def test_missing_questions_are_shown_and_block_default_final_submission(self):
@@ -223,7 +225,7 @@ class BatchWorkflowTests(unittest.TestCase):
             self.assertEqual(len(app.question_tree.get_children()), 1)
             called = []
             app.engine.batch = lambda action, ids, *args: called.append((action, list(ids), args))
-            app.paper_filter.set('可提交'); app.render_review()
+            app.paper_filter.set('待交卷'); app.render_review()
             app.paper_table.toggle_all(); app.paper_batch('submit')
             self.assertEqual(called[-1][1], ['a'])
             app.question_table.toggle_all(); app.redo_selected()
@@ -282,7 +284,7 @@ class BatchWorkflowTests(unittest.TestCase):
         engine.batch('submit', ['a'])
         self.finish_batch(engine)
         self.assertNotIn(self.store.task('a')['status'], ('unknown', 'submitting', 'submitted'))
-        self.assertEqual(self.store.task('a')['remote_state'], 'draft')
+        self.assertEqual(self.store.task('a')['remote_state'], 'local')
 
     def test_manual_partial_submit_flag_is_not_implicitly_enabled(self):
         engine = self.engine()

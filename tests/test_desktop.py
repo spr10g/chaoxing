@@ -13,6 +13,7 @@ from desktop.answers import AnswerService, validate
 from desktop.backend import Engine, Platform
 from desktop.scheduler import Lane, LaneFault, Cancelled
 from desktop.storage import Store
+from desktop.review import SubmissionUncertain
 
 
 def until(predicate, timeout=4):
@@ -47,7 +48,11 @@ class FakePlatform:
         pid = str(point['id'])
         jobs = [{'type': 'video', 'jobid': 'video-' + pid, 'name': 'video'},
                 {'type': 'workid', 'jobid': 'work-' + pid, 'enc': 'fresh'}]
-        return [j for j in jobs if j['jobid'] not in self.completed], {'knowledgeid': pid, 'ktoken': 'token', 'cpi': '1'}
+        return [j for j in jobs if j['jobid'] not in self.completed], {
+            'knowledgeid': pid, 'ktoken': 'token', 'cpi': '1',
+            'completed_jobs': list(self.completed),
+            'pending_jobs': [j['jobid'] for j in jobs if j['jobid'] not in self.completed],
+        }
 
     def fetch_work(self, task):
         return copy.deepcopy(self.documents.get(task['point']['id'], {'questions': [question()]}))
@@ -60,8 +65,9 @@ class FakePlatform:
 
     def write_work(self, task, doc, rows, submit=False):
         if self.raise_write:
-            raise TimeoutError('simulated timeout')
+            raise SubmissionUncertain('simulated timeout after POST')
         self.writes.append((task['id'], submit, copy.deepcopy(rows)))
+        if submit: self.completed.add(task['job']['jobid'])
 
 
 class DesktopTests(unittest.TestCase):
@@ -107,9 +113,9 @@ class DesktopTests(unittest.TestCase):
         engine = self.engine(platform)
         engine.ai.query = self.success
         engine.start(self.selections())
-        until(lambda: len(platform.writes) == 4)
+        until(lambda: len([r for r in self.store.tasks() if r.get('status') == 'local_saved']) == 4)
         self.assertEqual(platform.videos, [])
-        self.assertTrue(all(not submit for _, submit, _ in platform.writes))
+        self.assertEqual(platform.writes, [])
         platform.video_gate.set()
         until(lambda: len(platform.videos) == 4)
 
@@ -125,7 +131,8 @@ class DesktopTests(unittest.TestCase):
         until(lambda: len(engine.platform.videos) == 4)
         self.assertEqual(engine.platform.writes, [])
         gate.set()
-        until(lambda: len(engine.platform.writes) == 4)
+        until(lambda: not engine.busy())
+        self.assertEqual(len([r for r in self.store.tasks() if r.get('status') == 'local_saved']), 4)
 
     def test_global_api_fault_ends_answers_and_history_can_be_requeued(self):
         engine = self.engine()
@@ -140,7 +147,8 @@ class DesktopTests(unittest.TestCase):
         engine.ai.query = self.success
         ids = [r['id'] for r in self.store.tasks() if r.get('lane') == 'answer']
         engine.requeue(ids)
-        until(lambda: len(engine.platform.writes) == 4)
+        until(lambda: not engine.busy())
+        self.assertEqual(len([r for r in self.store.tasks() if r.get('status') == 'local_saved']), 4)
 
     def test_failed_question_is_preserved_and_does_not_submit_or_block_next_chapter(self):
         self.store.save_settings({'auto_submit': True})
@@ -153,14 +161,15 @@ class DesktopTests(unittest.TestCase):
             return self.success(q, checkpoint)
         engine.ai.query = query
         engine.start(self.selections(2))
-        until(lambda: len(platform.writes) == 2)
-        bad = next(w for w in platform.writes if w[0].endswith(':work-0:answer'))
+        until(lambda: not engine.busy())
+        self.assertEqual(len(platform.writes), 1)
+        bad = next(r for r in self.store.tasks() if r['id'].endswith(':work-0:answer'))
         good = next(w for w in platform.writes if w[0].endswith(':work-1:answer'))
-        self.assertFalse(bad[1])
+        self.assertEqual(bad['status'], 'local_saved')
         self.assertTrue(good[1])
-        self.assertEqual(len(bad[2]), 2)
-        self.assertTrue(bad[2][0]['error'])
-        self.assertEqual(bad[2][1]['answer'], 'B')
+        self.assertEqual(len(bad['rows']), 2)
+        self.assertTrue(bad['rows'][0]['error'])
+        self.assertEqual(bad['rows'][1]['answer'], 'B')
 
     def test_unknown_post_result_not_automatically_retried(self):
         self.store.save_settings({'auto_submit': True, 'video': False})
@@ -363,7 +372,8 @@ class DesktopTests(unittest.TestCase):
         engine.platform.completed.add('work-1')
         engine.verify('uncertain')
         until(lambda: not engine.manual)
-        self.assertEqual(self.store.task('uncertain')['status'], 'platform_done')
+        self.assertEqual(self.store.task('uncertain')['status'], 'submitted')
+        self.assertNotIn('document', self.store.task('uncertain'))
         self.assertEqual(engine.platform.writes, [])
 
     def test_original_video_loop_releases_slot_when_final_reports_never_pass(self):

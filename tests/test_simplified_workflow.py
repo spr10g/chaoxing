@@ -6,7 +6,7 @@ import unittest
 import test_desktop as fixtures
 from test_desktop import FakePlatform, question, until
 from desktop.ui import App
-from desktop.review import needs_sync
+from desktop.review import can_submit
 from desktop.scheduler import Lane
 
 
@@ -31,7 +31,9 @@ class ResumeTests(unittest.TestCase):
         until(lambda: self.store.task(tid)['status'] == 'removed')
         until(lambda: tid not in engine.lanes['answer'].pending)
         self.assertEqual(platform.writes, [])
-        engine.requeue([tid]); until(lambda: len(platform.writes) == 1)
+        engine.requeue([tid]); until(lambda: not engine.busy())
+        self.assertEqual(self.store.task(tid)['status'], 'local_saved')
+        self.assertEqual(platform.writes, [])
         self.assertEqual(calls, ['one', 'two'])
         self.assertIn('progress_checked_at', self.store.task(tid))
 
@@ -46,8 +48,9 @@ class ResumeTests(unittest.TestCase):
         engine.ai.query = lambda *args, **kwargs: self.fail('Completed work must not call AI')
         engine.requeue([tid]); until(lambda: not engine.busy())
         self.assertEqual(checked, ['0'])
-        self.assertEqual(self.store.task(tid)['status'], 'platform_done')
-        self.assertEqual(len(engine.platform.writes), 1)
+        self.assertEqual(self.store.task(tid)['status'], 'submitted')
+        self.assertNotIn('rows', self.store.task(tid))
+        self.assertEqual(engine.platform.writes, [])
 
     def test_add_tasks_while_other_video_is_running_does_not_restart_it(self):
         self.store.save_settings({'answer': False, 'video_workers': 1})
@@ -66,7 +69,7 @@ class ResumeTests(unittest.TestCase):
         engine = self.engine(); engine.ai.query = self.success
         engine.start(self.selections(1)); until(lambda: not engine.busy())
         engine.start(self.selections(1)); until(lambda: not engine.busy())
-        self.assertEqual(len(engine.platform.writes), 1)
+        self.assertEqual(engine.platform.writes, [])
 
     def test_retry_discovery_uses_original_task_types(self):
         self.store.save_settings({'video': False})
@@ -78,7 +81,8 @@ class ResumeTests(unittest.TestCase):
         engine.platform.jobs = jobs; engine.ai.query = self.success
         self.store.save_settings({'video': True, 'answer': False})
         engine.requeue([tid]); until(lambda: not engine.busy())
-        self.assertEqual(len(engine.platform.writes), 1)
+        self.assertEqual(engine.platform.writes, [])
+        self.assertEqual(len([r for r in self.store.tasks() if r.get('lane') == 'answer']), 1)
         self.assertEqual(engine.platform.videos, [])
 
     def test_adding_auto_submit_batch_does_not_change_running_draft_batch(self):
@@ -92,9 +96,12 @@ class ResumeTests(unittest.TestCase):
         first = self.selections(1); engine.add(first); self.assertTrue(entered.wait(2))
         self.store.save_settings({'auto_submit': True})
         engine.add([(first[0][0], [{'id': '1', 'title': 'second'}])])
-        release.set(); until(lambda: len(engine.platform.writes) == 2)
+        release.set(); until(lambda: not engine.busy())
         modes = {tid: submit for tid, submit, rows in engine.platform.writes}
-        self.assertFalse(next(submit for tid, submit in modes.items() if ':work-0:' in tid))
+        self.assertEqual(len(modes), 1)
+        first_record = next(r for r in self.store.tasks() if ':work-0:' in r['id'])
+        self.assertEqual(first_record['status'], 'local_saved')
+        self.assertTrue(first_record['rows'])
         self.assertTrue(next(submit for tid, submit in modes.items() if ':work-1:' in tid))
 
     def test_requeue_checks_owner_before_changing_historical_progress(self):
@@ -151,15 +158,13 @@ class UiSelectionTests(SelectionTests, unittest.TestCase):
 
     success = fixtures.DesktopTests.success
 
-    def test_sync_is_available_only_after_changes_and_skips_unchanged_records(self):
+    def test_edit_is_saved_locally_without_explicit_sync_step(self):
         from test_batch_workflow import BatchWorkflowTests
         engine = fixtures.DesktopTests.engine(self)
         clean = BatchWorkflowTests.paper(self, engine, 'clean')
         changed = BatchWorkflowTests.paper(self, engine, 'changed')
         engine.edit_answer('changed', 'q1', {'answers': ['A']})
-        self.assertFalse(needs_sync(clean)); self.assertTrue(needs_sync(self.store.task('changed')))
-        engine.batch('save', ['clean', 'changed']); until(lambda: not engine.batch_threads)
-        batch = self.store.get('batch_history')[-1]
-        self.assertEqual([r['result'] for r in batch['items']], ['skipped', 'success'])
-        self.assertEqual([r[0] for r in engine.platform.writes], ['changed'])
-        self.assertFalse(needs_sync(self.store.task('changed')))
+        self.assertEqual(self.store.task('changed')['rows'][0]['answer'], 'A')
+        self.assertEqual(self.store.task('clean'), clean | {'updated': self.store.task('clean')['updated']})
+        self.assertTrue(can_submit(self.store.task('changed')))
+        self.assertEqual(engine.platform.writes, [])

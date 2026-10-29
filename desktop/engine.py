@@ -5,8 +5,8 @@ import time
 import uuid
 
 from .answers import AnswerService, fingerprint, validate
-from .review import (rows_for, summary, can_submit, needs_sync, changed_row, dirty_remote, remote_state,
-                     FINAL, UNCERTAIN, FormConflict, SubmissionRejected)
+from .review import (rows_for, summary, can_submit, changed_row,
+                     confirmed_submission, FINAL, UNCERTAIN, FormConflict, SubmissionRejected, SubmissionUncertain)
 from .scheduler import Lane, LaneFault, Cancelled, TaskRemoved
 
 
@@ -286,8 +286,15 @@ class Engine:
                     if work['id'] in self.excluded or (old and old.get('queue_removed') and (targets is None or work['id'] not in targets)):
                         continue
                     if old and old.get('status') in FINAL | UNCERTAIN:
-                        self.record(old, execution_state='done', progress_checked_at=time.time(), queue_removed=False)
-                        continue
+                        if old['status'] == 'platform_done' and not confirmed_submission(old):
+                            self.record(old, status='local_saved', remote_state='local')
+                        else:
+                            changes = dict(execution_state='done', progress_checked_at=time.time(), queue_removed=False)
+                            if confirmed_submission(old):
+                                changes.update(status='unknown', remote_state='unknown',
+                                               reason='平台仍返回待做任务，与交卷成功记录不一致，请稍后核实')
+                            self.record(old, **changes)
+                            continue
                     self.record(work, queue_removed=False, progress_checked_at=time.time(), job=job, info=info, auto_submit=mode)
                     lane = self.lanes[lane_name]
                     if lane.cancelled.is_set():
@@ -304,8 +311,15 @@ class Engine:
                         continue
                     job_id = str(record['job'].get('jobid') or record['job'].get('objectid'))
                     if job_id not in present:
-                        self.record(record, status='platform_done' if record['lane'] == 'answer' else 'done', execution_state='done',
-                                    remote_state='completed', queue_removed=False, progress_checked_at=time.time(), reason='平台已完成，进度已更新')
+                        if record['lane'] == 'answer':
+                            if job_id in info.get('completed_jobs', []) or confirmed_submission(record):
+                                self.complete_submission(record, 'platform_passed')
+                            else:
+                                self.record(record, status='unknown', remote_state='unknown', execution_state='done',
+                                            queue_removed=False, reason='任务列表未找到该测验，交卷结果待确认；本地草稿保留')
+                        else:
+                            self.record(record, status='done', execution_state='done', queue_removed=False,
+                                        progress_checked_at=time.time(), reason='平台已完成，进度已更新')
         except Cancelled:
             raise
         except Exception as exc:
@@ -354,6 +368,9 @@ class Engine:
         if info.get('notOpen'):
             raise FormConflict('该章节未开放，无法读取或提交')
         job = next((j for j in jobs if j.get('jobid') == task['job'].get('jobid')), None)
+        if job is None and task.get('lane') == 'answer':
+            if str(task['job']['jobid']) not in info.get('completed_jobs', []) and not confirmed_submission(task):
+                raise SubmissionUncertain('任务列表未找到该测验，尚不能确认已交卷；本地草稿保留，请稍后核实')
         return dict(task, job=job, info=info) if job else None
 
     def refreshed_document(self, record, document):
@@ -380,14 +397,17 @@ class Engine:
         old = self.store.task(task['id']) or task
         if old.get('status') in FINAL | UNCERTAIN:
             return old['status']
-        fresh = self.fresh_task(task)
+        try:
+            fresh = self.fresh_task(task)
+        except SubmissionUncertain as exc:
+            self.record(task, remote_state='unknown', reason=str(exc))
+            return 'unknown'
         if fresh is None:
-            self.record(task, remote_state='completed')
-            return 'platform_done'
+            return self.complete_submission(task, 'platform_passed')
         document = self.platform.fetch_work(fresh)
         old = self.archive_document(old, document)
         rows = self.refreshed_document(old, document)
-        self.record(task, document=document, rows=rows, job=fresh['job'], info=fresh['info'], reason='')
+        self.record(task, document=document, rows=rows, job=fresh['job'], info=fresh['info'], submission_error='', reason='')
         for index, q in enumerate(document['questions']):
             checkpoint()
             previous = rows[index]
@@ -401,42 +421,56 @@ class Engine:
             except Exception as exc:
                 result = {'error': str(exc)}
             rows[index] = changed_row(previous, q, result)
-            self.record(task, rows=rows, remote_state=dirty_remote(old))
+            self.record(task, rows=rows, remote_state='local')
             checkpoint()
         ready = summary({'document': document, 'rows': rows})['ready']
         auto = bool(task.get('auto_submit', self.auto_submit)) and ready and not old.get('require_review')
-        if not auto and remote_state(self.store.task(task['id'])) == 'draft':
-            return 'draft'
-        return self.save_or_submit(fresh, document, rows, auto)
+        if auto:
+            return self.submit_work(fresh, document, rows)
+        errors = summary({'document': document, 'rows': rows})['errors']
+        self.record(task, remote_state='local', reason=f'本地草稿已保存，{errors} 道题需要处理' if errors else '本地草稿已保存，等待审核交卷')
+        return 'local_saved'
 
-    def save_or_submit(self, task, document, rows, submit, allow_blank=False):
-        old = self.store.task(task['id']) or task
-        if submit:
-            self.record(task, status='submitting', remote_state='submitting')
+    def complete_submission(self, task, evidence):
+        """Replace the draft with a small receipt in the same durable transaction."""
+        with self.lock:
+            old = self.store.task(task['id']) or task
+            now = time.time()
+            receipt = old.get('submission_receipt') or {
+                'confirmed_at': now, 'evidence': evidence,
+            }
+            keep = ('id', 'lane', 'course', 'point', 'owner', 'auto_submit', 'list_hidden', 'progress_checked_at')
+            record = {key: copy.deepcopy(old[key]) for key in keep if key in old}
+            record.update(job={key: value for key, value in old.get('job', {}).items() if key in ('jobid', 'name')},
+                          status='submitted', remote_state='submitted', execution_state='done',
+                          submitted_at=old.get('submitted_at') or now, submission_receipt=receipt,
+                          revision=old.get('revision', 0) + 1, updated=now,
+                          reason='交卷成功，本地草稿已清理')
+            self.store.save_task(record)
+            self.emit('task', copy.deepcopy(record))
+        self.recheck_blocked()
+        return 'submitted'
+
+    def submit_work(self, task, document, rows, allow_blank=False):
+        self.record(task, status='submitting', remote_state='submitting', submission_error='')
         try:
             if allow_blank:
-                self.platform.write_work(task, document, rows, submit=submit, allow_blank=True)
+                self.platform.write_work(task, document, rows, submit=True, allow_blank=True)
             else:
-                self.platform.write_work(task, document, rows, submit=submit)
+                self.platform.write_work(task, document, rows, submit=True)
         except Cancelled:
-            if submit:
-                self.record(task, remote_state=remote_state(old))
+            self.record(task, status='local_saved', remote_state='local')
             raise
         except (FormConflict, SubmissionRejected) as exc:
-            self.record(task, remote_state=remote_state(old) if submit else 'draft_failed', reason=str(exc))
+            self.record(task, status='local_saved', remote_state='local', submission_error=str(exc), reason=str(exc))
             return 'local_saved'
+        except SubmissionUncertain as exc:
+            self.record(task, status='unknown', remote_state='unknown', reason='交卷结果待确认：' + str(exc))
+            return 'unknown'
         except Exception as exc:
-            self.record(task, remote_state='unknown' if submit else 'draft_failed',
-                        reason=('交卷结果需核验：' if submit else '平台草稿同步失败，本地结果保留：') + str(exc))
-            return 'unknown' if submit else 'local_saved'
-        if submit:
-            self.record(task, remote_state='submitted', submitted_at=time.time(), require_review=False,
-                        reason='整份测验已交卷' + ('（含留空题）' if allow_blank else ''))
-            self.recheck_blocked()
-            return 'submitted'
-        self.record(task, remote_state='draft', draft_saved_at=time.time(),
-                    reason='正常答案已同步平台草稿；' + ('仍有需处理题目' if summary({'document': document, 'rows': rows})['errors'] else '等待审核交卷'))
-        return 'draft'
+            self.record(task, status='local_saved', remote_state='local', submission_error=str(exc), reason=str(exc))
+            return 'local_saved'
+        return self.complete_submission(task, 'submit_response')
 
     def _editable(self, record):
         if not record or record.get('lane') != 'answer':
@@ -460,14 +494,14 @@ class Engine:
             value = validate(rows[index]['question'], payload)
             rows[index] = changed_row(rows[index], rows[index]['question'], {'payload': payload, 'answer': value, 'source': '人工修正', 'error': ''})
             self.record(record, rows=rows, status='local_saved', require_review=True,
-                        remote_state=dirty_remote(record), reason='人工修正已保留，尚未同步平台')
+                        remote_state='local', submission_error='', reason='修改已自动保存到本地草稿')
         finally:
             mutex.release()
 
     def batch(self, action, task_ids, question_ids=None, allow_blank=False):
         if not self.connected:
             raise ValueError('尚未登录，请先登录后进行平台操作')
-        if action not in ('verify', 'save', 'submit', 'redo'):
+        if action not in ('verify', 'submit', 'redo'):
             raise ValueError('未知批量操作')
         ids = list(dict.fromkeys(task_ids))
         if not ids:
@@ -521,16 +555,14 @@ class Engine:
                                 if action == 'submit' and not can_submit(record, allow_blank):
                                     raise ValueError('这份测验仍有异常题或未答题，已跳过')
                                 fresh = self.fresh_task(record)
-                                if action == 'save' and not needs_sync(record):
-                                    status = 'unchanged'
-                                elif fresh is None:
-                                    self.record(record, status='platform_done', remote_state='completed', reason='平台显示任务已完成，无需重交')
-                                    status = 'platform_done'
+                                if fresh is None:
+                                    status = self.complete_submission(record, 'platform_passed')
                                 else:
-                                    status = self.save_or_submit(fresh, record['document'], rows_for(record), action == 'submit', allow_blank and action == 'submit')
+                                    status = self.submit_work(fresh, record['document'], rows_for(record), allow_blank)
                                     self.record(record, status=status)
                         final = self.store.task(tid)
-                        item.update(result='skipped' if status == 'unchanged' else 'success' if status in ('draft', 'submitted', 'platform_done', 'review') else 'failed', reason='草稿已同步，无新修改' if status == 'unchanged' else final.get('reason', ''), status=status)
+                        item.update(result='success' if status in ('submitted', 'review') else 'failed',
+                                    reason=final.get('reason', ''), status=status)
                         if action == 'redo' and status == 'review' and any(row['error'] for row in rows_for(final) if row['question']['id'] in selected):
                             item['result'] = 'partial'
                     except (Cancelled, TaskRemoved) as exc:
@@ -541,7 +573,14 @@ class Engine:
                         self.api_fault('answer', api_fault)
                         self.record({'id': tid}, reason='本轮 AI 操作已结束：' + api_fault)
                         item.update(result='failed', reason=api_fault)
+                    except SubmissionUncertain as exc:
+                        self.record({'id': tid}, status='unknown', remote_state='unknown', execution_state='done', reason=str(exc))
+                        item.update(result='failed', reason=str(exc), status='unknown')
                     except Exception as exc:
+                        if action == 'submit' and acquired:
+                            current = self.store.task(tid)
+                            if current and current.get('status') not in FINAL | UNCERTAIN:
+                                self.record(current, submission_error=str(exc), reason=str(exc))
                         item.update(result='failed' if acquired else 'skipped', reason=str(exc))
                     finally:
                         if acquired:
@@ -565,37 +604,36 @@ class Engine:
     def _verify(self, record):
         fresh = self.fresh_task(record)
         if fresh is None:
-            self.record(record, status='platform_done', remote_state='completed', reason='平台任务列表显示任务已完成')
-            return 'platform_done'
+            return self.complete_submission(record, 'platform_passed')
+        if record.get('submission_receipt') or confirmed_submission(record):
+            self.record(record, status='unknown', remote_state='unknown', execution_state='done',
+                        reason='平台仍返回待做任务，与交卷成功记录不一致，请稍后核实')
+            return 'unknown'
         document = self.platform.fetch_work(fresh)
         record = self.archive_document(record, document)
         same = [fingerprint(q) for q in record.get('document', {}).get('questions', [])] == [fingerprint(q) for q in document['questions']]
-        state = remote_state(record)
-        status = record.get('status', 'local_saved')
-        if status in UNCERTAIN:
-            status, state = 'local_saved', 'unknown_draft'
-        if status in ('interrupted', 'removed', 'failed'):
-            status = 'local_saved'
-        changes = dict(status=status, platform_state='incomplete', remote_state=state,
-                       job=fresh['job'], info=fresh['info'], reason='平台任务仍未完成；本次只核验，未保存或交卷')
+        uncertain = record.get('status') in UNCERTAIN and str(record['job']['jobid']) not in fresh['info'].get('pending_jobs', [])
+        changes = dict(status='unknown' if uncertain else 'local_saved', platform_state='incomplete',
+                       remote_state='unknown' if uncertain else 'local', execution_state='done',
+                       job=fresh['job'], info=fresh['info'], submission_error='',
+                       reason='平台仍返回任务，但未取得明确交卷结果，请稍后核实' if uncertain else '已读取平台状态，测验尚未交卷；本地草稿保留')
         if not same:
-            changes.update(status='local_saved', document=document, rows=self.refreshed_document(record, document),
-                           remote_state=dirty_remote(record), require_review=True, reason='平台题目有更新，请处理变化题目；原结果保留在历史中')
+            changes.update(document=document, rows=self.refreshed_document(record, document), require_review=True,
+                           reason=changes['reason'] if uncertain else '平台题目有更新，请处理变化题目；原结果保留在本地')
         self.record(record, **changes)
-        return 'review'
+        return 'unknown' if uncertain else 'review'
 
     def _redo(self, record, selected, checkpoint):
         fresh = self.fresh_task(record)
         if fresh is None:
-            self.record(record, status='platform_done', remote_state='completed', reason='平台任务已完成，未再调用 AI')
-            return 'platform_done'
+            return self.complete_submission(record, 'platform_passed')
         document = self.platform.fetch_work(fresh)
         record = self.archive_document(record, document)
         rows = self.refreshed_document(record, document)
         available = {q['id'] for q in document['questions']}
         if not selected <= available:
             raise ValueError('选中题目的编号已变化，请重新核验后选择题目')
-        self.record(record, document=document, rows=rows, status='review', require_review=True, remote_state=dirty_remote(record))
+        self.record(record, document=document, rows=rows, status='review', require_review=True, remote_state='local', submission_error='')
         failures = 0
         for index, row in enumerate(rows):
             if row['question']['id'] not in selected:
@@ -611,17 +649,17 @@ class Engine:
                 answer = {'error': str(exc)}
                 failures += 1
             rows[index] = changed_row(row, row['question'], answer)
-            self.record(record, rows=rows, status='review', require_review=True, remote_state=dirty_remote(record),
+            self.record(record, rows=rows, status='review', require_review=True, remote_state='local',
                         reason='AI 重做结果已本地保留，等待审核；未自动交卷')
             checkpoint()
-        self.record(record, reason=f'AI 重做 {len(selected)} 题，{failures} 题仍需处理；结果待审核，未自动保存或交卷')
+        self.record(record, reason=f'AI 重做 {len(selected)} 题，{failures} 题仍需处理；已保存到本地草稿')
         return 'review'
 
     def approve(self, task_id):
         record = self.store.task(task_id)
         self._editable(record)
         if not can_submit(record):
-            raise ValueError('该章节仍有异常题；请保存正常题、重做或明确选择含空题交卷')
+            raise ValueError('该测验仍有异常题；请修改、重做或明确选择含空题交卷')
         return self.batch('submit', [task_id])
 
     def verify(self, task_id):
@@ -677,8 +715,11 @@ class Engine:
     def busy(self):
         if (self.discovery and self.discovery.is_alive()) or any(t.is_alive() for t in list(self.discovery_threads)):
             return True
-        return any(any(state in ('queued', 'running', 'removing', 'paused') for state in lane.states.values())
-                   for lane in self.lanes.values() if not lane.cancelled.is_set())
+        for lane in list(self.lanes.values()):
+            with lane.lock:
+                if lane.pending:
+                    return True
+        return False
 
     def stop(self):
         self.discovery_stop.set()

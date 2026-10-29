@@ -49,11 +49,12 @@ class Store:
         for record in self.tasks():
             if record.get('status') in ('queued', 'running', 'submitting', 'paused', 'removing', 'checking') or record.get('execution_state') in ('queued', 'running', 'removing', 'checking'):
                 previous = record['status']
-                status = 'unknown' if previous == 'submitting' else previous if previous in ('draft', 'local_saved', 'review', 'submitted', 'platform_done') else 'interrupted'
+                status = 'unknown' if previous in ('submitting', 'unknown') else previous if previous in ('draft', 'local_saved', 'review', 'submitted', 'platform_done') else 'interrupted'
                 record.update(status=status, execution_state='interrupted',
                               reason='上次运行中断；重新运行前会检查平台状态')
-                if previous == 'submitting':
+                if previous in ('submitting', 'unknown'):
                     record['remote_state'] = 'unknown'
+                    record['reason'] = '上次交卷结果待确认；本地草稿保留，请先核实交卷结果'
                 self.save_task(record)
 
     def get(self, key, table='kv'):

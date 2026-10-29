@@ -1,4 +1,4 @@
-"""Question validation and independent platform/execution state presentation."""
+"""Local draft validation and the user-facing submission lifecycle."""
 import copy
 import time
 
@@ -46,22 +46,33 @@ def summary(record):
             'ready': bool(rows) and good == len(rows)}
 
 
-def remote_state(record):
-    if record.get('remote_state'):
-        return record['remote_state']
-    return {'draft': 'draft', 'submitted': 'submitted', 'platform_done': 'completed',
-            'unknown': 'unknown', 'submitting': 'submitting'}.get(record.get('status'), 'unknown_draft')
+def confirmed_submission(record):
+    return record.get('status') in FINAL and record.get('platform_state') != 'incomplete' and bool(record.get('submission_receipt') or
+                                                  (record.get('status') == 'submitted' and record.get('submitted_at')))
 
 
-def remote_label(record):
-    labels = {'draft': '平台草稿已保存', 'draft_old': '平台有草稿 · 本地有更新',
-              'draft_failed': '草稿同步失败 · 本地保留', 'unknown_draft': '平台草稿未核实',
-              'dirty': '本地有更新 · 未同步', 'submitted': '已交卷', 'completed': '平台任务已完成',
-              'submitting': '交卷请求处理中', 'unknown': '交卷结果待核验'}
-    text = labels.get(remote_state(record), '平台状态待核实')
-    if record.get('platform_state') == 'incomplete' and remote_state(record) not in ('submitted', 'completed'):
-        text += ' · 任务未完成'
-    return text
+def paper_state(record, busy=False):
+    if busy or record.get('status') == 'submitting': return '处理中'
+    if record.get('status') in UNCERTAIN: return '待确认'
+    if confirmed_submission(record): return '已交卷'
+    if record.get('status') in FINAL: return '待确认'
+    if record.get('execution_state', record.get('status')) in ('queued', 'running', 'checking', 'removing'):
+        return '处理中'
+    if record.get('submission_error') or record.get('status') in ('failed', 'blocked', 'paused'):
+        return '需处理'
+    return '待交卷' if summary(record)['ready'] else '需处理'
+
+
+def paper_reason(record, busy=False):
+    state = paper_state(record, busy)
+    if state == '已交卷': return '交卷成功，已清理本地草稿' if record.get('submission_receipt') else '历史交卷成功记录'
+    if state == '待确认':
+        if record.get('status') in FINAL: return '历史完成状态尚需核实，请读取平台状态'
+        return record.get('reason') or '交卷结果尚未明确，请读取平台状态'
+    if state == '处理中': return record.get('reason') or '程序正在处理，请等待完成'
+    if record.get('submission_error'): return record['submission_error']
+    if state == '待交卷': return '本地草稿已保存，可审核后交卷'
+    return record.get('reason') or (f"{summary(record)['errors']} 道题尚未完成或有异常" if summary(record)['total'] else '尚未读取题目，请从任务页重新加入')
 
 
 def needs_review(record):
@@ -70,12 +81,8 @@ def needs_review(record):
 
 def can_submit(record, allow_blank=False):
     quality = summary(record)
-    return needs_review(record) and bool(quality['good']) and (quality['ready'] or allow_blank)
-
-
-def needs_sync(record):
-    """Only locally changed or unsuccessfully saved papers need a draft POST."""
-    return needs_review(record) and bool(summary(record)['good']) and remote_state(record) != 'draft'
+    executing = record.get('execution_state', record.get('status')) in ('queued', 'running', 'checking', 'removing')
+    return needs_review(record) and not executing and bool(quality['good']) and (quality['ready'] or allow_blank)
 
 
 def changed_row(previous, question, result):
@@ -84,7 +91,3 @@ def changed_row(previous, question, result):
         history.append({'time': time.time(), **{k: copy.deepcopy(v) for k, v in previous.items() if k != 'history'}})
     return {'question': copy.deepcopy(question), 'source': '', 'answer': '', 'error': '',
             **result, 'history': history, 'changed_at': time.time()}
-
-
-def dirty_remote(record):
-    return 'draft_old' if remote_state(record) in ('draft', 'draft_old') else 'dirty'

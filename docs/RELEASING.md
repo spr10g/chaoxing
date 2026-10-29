@@ -2,7 +2,7 @@
 
 仓库：https://github.com/spr10g/chaoxing
 
-版本同步分为两部分：源码推送到 `main`，程序包与对应源码包发布到 Releases。下面以 **v0.3.2** 为例，每次替换为实际版本号。
+版本同步分为两部分：源码推送到 `main`，程序包与对应源码包发布到 Releases。下面以 **v0.3.3** 为例，每次替换为实际版本号。
 
 ## 1. 更新版本信息
 
@@ -19,16 +19,16 @@ Set-Location -LiteralPath 'C:\学习通\chaoxing'
 powershell -File scripts\build.ps1 -Python .\.venv\Scripts\python.exe
 ```
 
-程序输出到 `dist/ChaoxingDesktop-v0.3.2-windows-x64/`。整个目录包含 EXE、`_internal` 和使用文档。
+程序输出到 `dist/ChaoxingDesktop-v0.3.3-windows-x64/`。整个目录包含 EXE、`_internal` 和使用文档。
 
 ## 3. 提交源码与版本标签
 
 ```powershell
 git add --all
-git commit -m "发布学习通批量工作台 v0.3.2"
+git commit -m "发布学习通批量工作台 v0.3.3"
 git push origin main
-git tag -a v0.3.2 -m "学习通批量工作台 v0.3.2"
-git push origin v0.3.2
+git tag -a v0.3.3 -m "学习通批量工作台 v0.3.3"
+git push origin v0.3.3
 ```
 
 源码版本由该标签确定，随后从相同标签导出源码包。
@@ -36,7 +36,7 @@ git push origin v0.3.2
 ## 4. 生成两个下载包
 
 ```powershell
-$releaseVersion = '0.3.2'
+$releaseVersion = '0.3.3'
 $projectPath = 'C:\学习通\chaoxing'
 $releasePath = 'C:\学习通\releases'
 New-Item -ItemType Directory -Path $releasePath -Force | Out-Null
@@ -54,8 +54,8 @@ git archive --format=zip --prefix="chaoxing-v${releaseVersion}-source/" -o "$rel
 
 1. 打开仓库的 [Releases](https://github.com/spr10g/chaoxing/releases)。
 2. 点击 **Draft a new release**（新建发布）。
-3. 在 **Choose a tag** 中选择刚推送的 `v0.3.2`。
-4. 填写中文标题，例如“学习通批量工作台 v0.3.2”，并填写本次修改说明。
+3. 在 **Choose a tag** 中选择刚推送的 `v0.3.3`。
+4. 填写中文标题，例如“学习通批量工作台 v0.3.3”，并填写本次修改说明。
 5. 上传上述程序 ZIP 和源码 ZIP。
 6. 将本版设为最新版，点击 **Publish release**（发布）。
 

@@ -42,7 +42,7 @@ class TaskPicker:
         ttk.Checkbutton(kind, text='AI 答题', variable=app.variable('answer', True)).pack(side='left')
         mode = ttk.Frame(outer); mode.pack(fill='x')
         ttk.Label(mode, text='答题完成后').pack(side='left', padx=(0, 12))
-        ttk.Radiobutton(mode, text='保存草稿，等待审核', variable=app.variable('auto_submit', True), value=False).pack(side='left')
+        ttk.Radiobutton(mode, text='保存本地草稿，等待审核', variable=app.variable('auto_submit', True), value=False).pack(side='left')
         ttk.Radiobutton(mode, text='自动交卷完整测验', variable=app.variable('auto_submit', True), value=True).pack(side='left', padx=12)
         self.summary = ttk.Label(outer, style='Muted.TLabel'); self.summary.pack(anchor='w', pady=10)
         self.start_button = ttk.Button(outer, text='添加并开始', style='Accent.TButton', command=self.start)

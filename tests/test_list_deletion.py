@@ -115,4 +115,4 @@ class ListDeletionTests(unittest.TestCase):
         engine.add(self.selections(1)); fixtures.until(lambda: not engine.busy())
         self.assertEqual(self.store.task(tid)['list_hidden'], {})
         self.assertEqual(len(rows_for(self.store.task(tid))), 1)
-        self.assertEqual(len(engine.platform.writes), 1)
+        self.assertEqual(engine.platform.writes, [])

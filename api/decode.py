@@ -182,9 +182,17 @@ def decode_course_card(html_text: str) -> Tuple[List[Dict[str, Any]], Dict[str, 
 
     # 提取任务信息
     job_info = _extract_job_info(cards_data)
+    if not job_info:
+        return [], {}
 
     # 处理所有附件任务
     cards = cards_data.get("attachments", [])
+    # Keep explicit evidence even though completed cards are omitted from job_list.
+    work_cards = [c for c in cards if c.get('type') == 'workid' and c.get('jobid')]
+    job_info['completed_jobs'] = [str(c['jobid']) for c in work_cards
+                                  if c.get('isPassed') in (True, 1, 'true')]
+    job_info['pending_jobs'] = [str(c['jobid']) for c in work_cards
+                                if 'isPassed' in c and c['isPassed'] in (False, 0, 'false')]
     job_list = _process_attachment_cards(cards)
 
     return job_list, job_info
@@ -230,7 +238,7 @@ def _process_attachment_cards(cards: List[Dict[str, Any]]) -> List[Dict[str, Any
     
     for card in cards:
         # 跳过已通过的任务
-        if card.get("isPassed", False):
+        if card.get("isPassed", False) in (True, 1, 'true'):
             continue
             
         # 处理不同类型的任务

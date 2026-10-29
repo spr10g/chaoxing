@@ -6,10 +6,10 @@ from tkinter import ttk
 from .ui_base import BaseApp
 from .ui_tables import CheckedTable
 from .ui_picker import TaskPicker
-from .review import rows_for, summary, can_submit, needs_sync, needs_review, remote_label, FINAL, UNCERTAIN
+from .review import rows_for, summary, can_submit, needs_review, paper_state, paper_reason, FINAL
 
 
-ACTIONS = {'verify': '读取平台状态', 'save': '同步草稿', 'submit': '提交测验', 'redo': 'AI 重做'}
+ACTIONS = {'verify': '核实交卷结果', 'save': '旧版草稿保存', 'submit': '交卷到学习通', 'redo': 'AI 重做'}
 ACTIVE = {'checking', 'queued', 'running', 'removing', 'blocked'}
 EXECUTION = {'checking': '读取进度', 'queued': '等待执行', 'running': '执行中', 'removing': '正在取消',
              'removed': '已取消', 'interrupted': '已取消', 'failed': '失败', 'blocked': '未开放',
@@ -19,14 +19,6 @@ EXECUTION = {'checking': '读取进度', 'queued': '等待执行', 'running': '�
 def execution_state(record):
     state = record.get('execution_state', record.get('status', ''))
     return 'done' if state in ('draft', 'local_saved', 'review', 'submitted', 'platform_done', 'unknown', 'submitting') else state
-
-
-def paper_state(record):
-    if record.get('status') in UNCERTAIN: return '待确认'
-    if record.get('status') in FINAL: return '已交卷'
-    quality = summary(record)
-    if not quality['total']: return '待答题'
-    return '待处理' if quality['errors'] else '可提交'
 
 
 def question_state(row):
@@ -102,19 +94,19 @@ class App(BaseApp):
                                           {'course': 125, 'paper': 230, 'title': 300, 'answer': 80, 'state': 80})
         self.question_table.pack(fill='both', expand=True); self.question_tree = self.question_table.tree
         pbar = ttk.Frame(papers); pbar.pack(fill='x', pady=(0, 8))
-        self.paper_filter = tk.StringVar(value='待处理')
-        self.combo(pbar, self.paper_filter, ['待处理', '全部测验', '待同步', '可提交', '有异常', '待确认', '已交卷'], self.render_review, 12)
-        self.sync_button = self.button(pbar, '同步草稿', lambda: self.paper_batch('save'))
-        self.submit_button = self.button(pbar, '提交测验', lambda: self.paper_batch('submit'), True)
+        self.paper_filter = tk.StringVar(value='全部测验')
+        self.combo(pbar, self.paper_filter, ['全部测验', '处理中', '待交卷', '需处理', '待确认', '已交卷'], self.render_review, 12)
+        self.submit_button = self.button(pbar, '交卷到学习通', lambda: self.paper_batch('submit'), True)
+        self.paper_detail_button = self.button(pbar, '查看详情', self.show_paper)
         self.paper_more = ttk.Menubutton(pbar, text='更多'); self.paper_more.pack(side='left', padx=(0, 6))
         menu = tk.Menu(self.paper_more, tearoff=False); self.paper_more.configure(menu=menu)
-        menu.add_command(label='读取平台状态', command=lambda: self.paper_batch('verify'))
+        menu.add_command(label='核实交卷结果', command=lambda: self.paper_batch('verify'))
         menu.add_command(label='含未答题交卷', command=lambda: self.paper_batch('submit', True))
         self.paper_delete_button = self.button(pbar, '删除', lambda: self.delete_selected('papers'))
         self.paper_count = ttk.Label(pbar, style='Muted.TLabel'); self.paper_count.pack(side='right')
-        self.paper_table = CheckedTable(papers, ('course', 'paper', 'counts', 'state', 'sync'),
-                                       ('课程', '章节 / 测验', '正常 / 异常 / 总数', '答题状态', '平台草稿'), self.paper_selection,
-                                       {'course': 140, 'paper': 300, 'counts': 135, 'state': 90, 'sync': 130})
+        self.paper_table = CheckedTable(papers, ('course', 'paper', 'counts', 'state'),
+                                       ('课程', '章节 / 测验', '正常 / 异常 / 总数', '测验状态'), self.paper_selection,
+                                       {'course': 140, 'paper': 380, 'counts': 135, 'state': 120})
         self.paper_table.pack(fill='both', expand=True); self.review_tree = self.paper_table.tree
         self.answer_tabs.bind('<<NotebookTabChanged>>', lambda event: self.selection_counts())
         self.selection_counts()
@@ -149,8 +141,8 @@ class App(BaseApp):
         if not hasattr(self, 'paper_table'): return
         records = [self.records[i] for i in self.paper_table.selected()]
         self.paper_count.configure(text=f'已选 {len(records)} 份')
-        self.sync_button.configure(state='normal' if any(needs_sync(r) for r in records) else 'disabled')
-        self.submit_button.configure(state='normal' if any(can_submit(r) for r in records) else 'disabled')
+        self.submit_button.configure(state='normal' if any(can_submit(r) and r['id'] not in self.engine.manual for r in records) else 'disabled')
+        self.paper_detail_button.configure(state='normal' if len(records) == 1 else 'disabled')
         self.paper_more.configure(state='normal' if records else 'disabled')
         self.paper_delete_button.configure(state='normal' if records else 'disabled')
 
@@ -229,16 +221,13 @@ class App(BaseApp):
         p_rows, q_rows, refs = [], [], {}
         for record in papers:
             if not self.course_matches(record): continue
-            tid = record['id']; quality = summary(record); state = paper_state(record)
+            tid = record['id']; quality = summary(record); state = paper_state(record, record['id'] in self.engine.manual)
             scope = self.paper_filter.get()
-            include = (scope == '全部测验' or (scope == '待处理' and state != '已交卷') or
-                       (scope == '待同步' and needs_sync(record)) or (scope == '可提交' and can_submit(record)) or
-                       (scope == '有异常' and quality['errors']) or scope == state)
+            include = scope == '全部测验' or scope == state
             hidden = record.get('list_hidden', {})
             if include and not hidden.get('papers'):
-                sync = '已同步' if record.get('remote_state') == 'draft' else '待同步' if needs_sync(record) else '—'
                 p_rows.append((tid, (record.get('course', {}).get('title', ''), location(record),
-                                    f"{quality['good']} / {quality['errors']} / {quality['total']}", state, sync)))
+                                    f"{quality['good']} / {quality['errors']} / {quality['total']}" if quality['total'] else '', state)))
             for row in rows_for(record):
                 if row['question']['id'] in hidden.get('questions', []): continue
                 qstate = question_state(row); qscope = self.question_filter.get()
@@ -270,7 +259,6 @@ class App(BaseApp):
 
     def paper_batch(self, action, allow_blank=False):
         ids = self.paper_table.selected()
-        if action == 'save': ids = [tid for tid in ids if needs_sync(self.records[tid])]
         self.begin_batch(action, ids, allow_blank=allow_blank)
 
     def redo_selected(self):
@@ -303,7 +291,7 @@ class App(BaseApp):
             payload = {'answers': [answer.lower()] if q['type'] == 'judgement' else list(answer.upper())}
             try:
                 self.engine.edit_answer(tid, qid, payload)
-                self.notice.set('答案已修改，测验草稿待同步'); window.destroy()
+                self.notice.set('答案已修改，本地草稿已自动保存'); window.destroy()
             except ValueError as exc: self.notice.set(str(exc))
         button = ttk.Button(bar, text='保存修改', command=save); button.pack(side='left', padx=(10, 0))
         button.configure(state='normal' if needs_review(record) else 'disabled')
@@ -312,7 +300,16 @@ class App(BaseApp):
         ids = self.task_table.selected()
         if len(ids) != 1: return
         record = self.records[ids[0]]
-        self.dialog('任务详情', f"{record.get('course', {}).get('title', '')}\n{location(record)}\n\n执行状态：{EXECUTION.get(execution_state(record), '已结束')}\n说明：{record.get('reason', '')}\n\n" + (remote_label(record) if record.get('lane') == 'answer' else ''))
+        self.dialog('任务详情', f"{record.get('course', {}).get('title', '')}\n{location(record)}\n\n执行状态：{EXECUTION.get(execution_state(record), '已结束')}\n说明：{record.get('reason', '')}")
+
+    def show_paper(self):
+        ids = self.paper_table.selected()
+        if len(ids) != 1: return
+        record = self.records[ids[0]]
+        import time
+        submitted = record.get('submitted_at')
+        stamp = '\n交卷确认时间：' + time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(submitted)) if submitted else ''
+        self.dialog('测验详情', f"{record.get('course', {}).get('title', '')}\n{location(record)}\n\n测验状态：{paper_state(record, ids[0] in self.engine.manual)}\n{paper_reason(record, ids[0] in self.engine.manual)}{stamp}")
 
     def show_batches(self):
         if self.batch_window and self.batch_window.winfo_exists(): self.batch_window.lift(); return
