@@ -1,69 +1,79 @@
 # 学习通批量工作台
 
-Windows 桌面程序，提供独立的视频与 AI 答题队列、多课程选择、跨章节审核和批量操作。基于 [Samueli924/chaoxing](https://github.com/Samueli924/chaoxing) 提供的接口与页面解析实现扩展。
+[下载程序](https://github.com/spr10g/chaoxing/releases/latest) · [使用指南](docs/USER_GUIDE.md) · [更新记录](CHANGELOG.md)
 
-## 下载与运行
+## 项目简介
 
-前往 [Releases](https://github.com/spr10g/chaoxing/releases) 下载：
+学习通批量工作台是一款 Windows 桌面应用，支持多课程任务管理、视频与 AI 答题独立执行、跨章节答案审核及批量操作。
 
-- **Windows x64 程序包**：解压后双击 `学习通工作台.exe`。必须保留旁边的 `_internal` 目录；不需要 Python、源码或 CMD。
-- **对应源码包**：供开发、检查和自行构建使用，与程序包分开下载，使用相同版本号。
+通过图形界面选择课程、章节和任务类型，集中查看执行进度、整理答案并管理队列。
 
-首次运行，在“连接与设置”填写自己的学习通账号和 AI API Key，点击登录并选择课程、章节和任务类型。默认先预览答案，不自动交卷。
+## 下载与安装
 
-## 功能
+当前版本：**v0.2.0**，适用于 **Windows x64**。
 
-- 多门课程分别选择章节，或一键选择整门课程。
-- 视频与答题独立推进，默认并发分别为 4、2，可配置。
-- DeepSeek 及其他 OpenAI 兼容服务接入；AI 只负责答题。
-- 文字单选、多选、判断题的解析、结构校验和选项映射。
-- 跨课程、跨章节汇总题目，筛选异常、多选、批量保存草稿与交卷。
-- 选题后让 AI 重做，跳过缓存、保留历史，结果先待审核。
-- 移出指定队列任务，保留已有结果，其他任务继续。
-- 设置、登录状态和任务记录独立保存在本机，更新程序后继续沿用。
+| 下载项 | 用途 |
+| --- | --- |
+| [Windows 程序包](https://github.com/spr10g/chaoxing/releases/download/v0.2.0/chaoxing-v0.2.0-windows-x64.zip) | 解压后直接运行 |
+| [对应源码包](https://github.com/spr10g/chaoxing/releases/download/v0.2.0/chaoxing-v0.2.0-source.zip) | 开发、阅读源码与自行构建 |
 
-默认只交卷完整且校验通过的测验。“校验通过”不等于答案知识一定正确。用户可以明确选择含空题交卷，平台是否接受及后续规则以平台返回为准。图片、暂不支持的题型和无法可靠识别的题目会保留原因。
+1. 下载 Windows 程序包。
+2. 完整解压，保持 `学习通工作台.exe` 与 `_internal` 目录位于同一文件夹。
+3. 双击 `学习通工作台.exe` 启动。
 
-## 设置与个人数据
+历史版本见 [版本发布页](https://github.com/spr10g/chaoxing/releases)。
 
-固定数据目录为 `%LOCALAPPDATA%\ChaoxingDesktop`。账号、API Key、Cookie 和数据库仅保存于运行者本机，当前为未加密存储。
+## 功能概览
 
-本仓库及发行包不包含维护者的登录数据、真实配置或数据库。升级时关闭程序、替换程序目录，保留用户数据目录；请勿将自己的数据目录提交到 Git。
+| 功能 | 说明 |
+| --- | --- |
+| 多课程管理 | 同时勾选多门课程，按章节或整门课程添加任务 |
+| 双队列执行 | 视频与答题分别调度，独立推进，支持配置并发数 |
+| AI 辅助答题 | 接入 DeepSeek 等 OpenAI 兼容服务，处理文字单选、多选和判断题 |
+| 跨章节审核 | 汇总多个课程、章节的题目，按题目状态筛选与多选 |
+| 批量操作 | 批量保存正常题草稿、提交可交卷章节、让 AI 重做异常题 |
+| 队列管理 | 分别暂停、恢复视频与答题队列，批量移出任务并保留已有结果 |
+| 设置与记录 | 自动保存连接设置、登录状态、任务进度及答案历史 |
 
-DeepSeek 的 OpenAI 兼容地址为 `https://api.deepseek.com`，默认模型 `deepseek-flash`。不要填写 `/anthropic` 或完整 `/chat/completions` 接口路径。
+## 使用说明
 
-详细操作见 [用户指南](docs/USER_GUIDE.md)。
+1. **连接账号**：在“连接与设置”填写学习通账号，点击“登录并加载课程”。
+2. **配置 AI**：填写 API 地址、API Key 和模型 ID。
+3. **选择任务**：在“任务与进度”勾选课程及章节，选择视频、AI 答题或两者，点击“启动所选课程”。
+4. **审核答案**：在“答案审核”集中查看题目，筛选异常题、修改答案或执行 AI 重做。
+5. **批量处理**：选择题目或章节，保存草稿或提交可交卷章节。
 
-## 开发与测试
+程序默认的 AI 连接配置：
 
-使用 **Python 3.12 x64、Windows**：
+| 配置项 | 默认值 |
+| --- | --- |
+| 接口协议 | OpenAI 兼容协议 |
+| API 地址 | `https://api.deepseek.com` |
+| 模型 ID | `deepseek-flash` |
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
-.\.venv\Scripts\python.exe desktop_main.py
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe tests\ui_layout.py
-```
+视频与答题的默认并发数分别为 **4** 和 **2**，可在“连接与设置”调整。
 
-```powershell
-powershell -File scripts\build.ps1 -Python .\.venv\Scripts\python.exe
-```
+设置与任务数据保存在 `%LOCALAPPDATA%\ChaoxingDesktop`。升级时关闭程序、替换程序目录，继续沿用此数据目录。
 
-构建产物位于 `dist/`，不会覆盖日常使用的程序。`requirements.lock.txt` 固定已验证的运行依赖；构建版本从 `desktop.__version__` 读取。GUI 启动、测试和源码导入均不自动登录或执行真实课程任务。
+详细操作与任务状态说明见 [使用指南](docs/USER_GUIDE.md)。
 
-## 源码结构
+## 开发与构建
 
-```text
-desktop/       界面、双队列、AI、审核与本地数据
-api/           复用并调整的平台接口与页面解析
-resource/      必需字体映射表
-tests/         离线回归与布局测试
-scripts/       构建与打包
-docs/          使用、开发及上游说明
-chaoxing.spec  PyInstaller 目录版构建配置
-```
+项目使用 **Python 3.12 x64** 和 **Tkinter** 开发，通过 **PyInstaller** 构建 Windows 程序包。
 
-## 许可与来源
+| 目录或文件 | 内容 |
+| --- | --- |
+| `desktop/` | 桌面界面、任务调度、AI 答题、审核与数据存储 |
+| `api/` | 平台接口与页面解析 |
+| `resource/` | 字体映射资源 |
+| `tests/` | 功能与界面布局测试 |
+| `scripts/` | 构建脚本 |
+| `docs/` | 使用与开发文档 |
 
-沿用 GNU GPL v3，见 [LICENSE](LICENSE)。复用代码保留原作者署名，详见 [NOTICE](NOTICE.md) 与 [上游说明](docs/UPSTREAM.md)。每次发布同时提供与可执行程序对应的源码下载。
+环境安装、源码运行及打包命令见 [开发说明](docs/DEVELOPMENT.md)。
+
+## 许可与致谢
+
+本项目采用 [GNU GPL v3](LICENSE) 许可证。
+
+项目基于 [Samueli924/chaoxing](https://github.com/Samueli924/chaoxing) 扩展，感谢上游作者及 SocialSisterYi 等贡献者。代码与资源来源见 [来源与署名](NOTICE.md)，上游项目资料见 [上游说明](docs/UPSTREAM.md)。
