@@ -55,9 +55,19 @@ git archive --format=zip --prefix="chaoxing-v${releaseVersion}-source/" -o "$rel
 1. 打开仓库的 [Releases](https://github.com/spr10g/chaoxing/releases)。
 2. 点击 **Draft a new release**（新建发布）。
 3. 在 **Choose a tag** 中选择刚推送的 `v0.3.3`。
-4. 填写中文标题，例如“学习通批量工作台 v0.3.3”，并填写本次修改说明。
+4. 填写中文标题，例如“学习通批量工作台 v0.3.3”。正文只列本次更新内容与要点，使用简短中文条目。
 5. 上传上述程序 ZIP 和源码 ZIP。
 6. 将本版设为最新版，点击 **Publish release**（发布）。
+
+发布正文示例：
+
+```markdown
+- 答题结果自动保存本地草稿，支持一次上传答案并交卷。
+- 合并测验状态，统一筛选和状态含义。
+- 交卷成功后清理本地草稿，保留简要记录。
+```
+
+安装与使用说明统一维护在 `README.md` 和 `docs/USER_GUIDE.md`。
 
 发布页面另外显示的 `Source code (zip)` 和 `Source code (tar.gz)` 由 GitHub 自动生成。
 
