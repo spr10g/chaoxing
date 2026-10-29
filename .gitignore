@@ -1,0 +1,29 @@
+# Local environment and generated artifacts
+.venv/
+__pycache__/
+*.py[cod]
+build/
+dist/
+diagnostics/
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Account data must never enter Git or release archives
+.env
+.env.*
+config.ini
+cookies.txt
+cache.json
+*.sqlite3*
+*.db
+*.db-*
+*.log
+last-error.json
+startup.json
+.instance.lock
+backups/
+.idea/
+.vscode/
+
+# Build specifications and credential-free examples are versioned intentionally.

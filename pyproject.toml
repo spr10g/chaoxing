@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chaoxing-desktop"
+dynamic = ["version", "dependencies"]
+description = "Windows desktop workspace with independent video and AI question queues"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = {file = "LICENSE"}
+
+[project.urls]
+Repository = "https://github.com/spr10g/chaoxing"
+Upstream = "https://github.com/Samueli924/chaoxing"
+
+[project.gui-scripts]
+chaoxing-desktop = "desktop_main:main"
+
+[tool.setuptools]
+packages = ["desktop", "api", "resource"]
+py-modules = ["desktop_main", "main"]
+
+[tool.setuptools.dynamic]
+version = {attr = "desktop.__version__"}
+dependencies = {file = ["requirements-desktop.txt"]}
+
+[tool.setuptools.package-data]
+resource = ["*.json", "*.md"]
