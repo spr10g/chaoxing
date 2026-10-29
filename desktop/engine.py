@@ -5,7 +5,7 @@ import time
 import uuid
 
 from .answers import AnswerService, fingerprint, validate
-from .review import (rows_for, summary, can_submit, changed_row, dirty_remote, remote_state,
+from .review import (rows_for, summary, can_submit, needs_sync, changed_row, dirty_remote, remote_state,
                      FINAL, UNCERTAIN, FormConflict, SubmissionRejected)
 from .scheduler import Lane, LaneFault, Cancelled, TaskRemoved
 
@@ -20,6 +20,8 @@ class Engine:
         self.ai = AnswerService(store, store.settings)
         self.lanes = {}
         self.discovery = None
+        self.discovery_threads = set()
+        self.scan_lock = threading.Lock()
         self.discovery_stop = threading.Event()
         self.lock = threading.RLock()
         self.discovery_guard = threading.RLock()
@@ -28,6 +30,7 @@ class Engine:
         self.excluded = set()
         self.manual = set()
         self.manual_cancel = {}
+        self.manual_action = {}
         self.task_locks = {}
         self.batch_threads = set()
         self.connected = platform is not None
@@ -84,7 +87,8 @@ class Engine:
             reason = old.get('reason', '')
         if status == 'blocked' and not reason:
             reason = '章节未开放或等待前置任务'
-        self.record(task, status=status, execution_state=status, reason=reason)
+        execution = status if status in ('queued', 'running', 'checking', 'removing', 'removed', 'failed', 'blocked', 'interrupted') else 'done'
+        self.record(task, status=status, execution_state=execution, reason=reason)
         self.emit('counts', {key: lane.counts() for key, lane in self.lanes.items()})
 
     def configure(self):
@@ -112,9 +116,89 @@ class Engine:
         self.lanes = {}
         for key, handler in (('video', self.run_video), ('answer', self.run_answer)):
             if s[key]:
-                self.lanes[key] = Lane(key, int(s[key + '_workers']), handler, self.state, self.task_guard)
+                self.lanes[key] = Lane(key, int(s[key + '_workers']), handler, self.state, self.task_guard, self.api_fault)
         self.discovery = threading.Thread(target=self._discover_all, args=(copy.deepcopy(selections),), daemon=True)
         self.discovery.start()
+
+    def _ensure_lanes(self, names):
+        self.configure()
+        self.ai.limit = int(self.store.settings['answer_workers'])
+        self.auto_submit = bool(self.store.settings['auto_submit'])
+        for name in names:
+            old = self.lanes.get(name)
+            if old and old.cancelled.is_set():
+                old.wait_stopped(.1)
+                if old.alive():
+                    raise ValueError('上次请求正在结束，请稍后重新加入')
+            if old is None or old.cancelled.is_set():
+                handler = self.run_video if name == 'video' else self.run_answer
+                self.lanes[name] = Lane(name, int(self.store.settings[name + '_workers']), handler, self.state, self.task_guard, self.api_fault)
+
+    def api_fault(self, name, reason):
+        if name != 'answer': return
+        lane = self.lanes.get('answer')
+        if lane:
+            lane.fault_reason = reason
+            lane.stop()
+        with self.lock:
+            for tid, action in self.manual_action.items():
+                if action == 'redo': self.manual_cancel[tid].set()
+
+    def add(self, selections):
+        """Append selected courses without restarting independent active queues."""
+        if not self.connected:
+            raise ValueError('请先登录并加载课程')
+        names = {name for name in ('video', 'answer') if self.store.settings[name]}
+        if not names:
+            raise ValueError('请选择视频或 AI 答题')
+        self._ensure_lanes(names)
+        self.discovery_stop.clear()
+        self._scan_async(copy.deepcopy(selections), names)
+
+    def _scan_async(self, selections, names, targets=None):
+        def scan():
+            try:
+                with self.scan_lock:
+                    self.platform.bind(self._discovery_checkpoint)
+                    for course, points in selections:
+                        for point in points:
+                            self._discovery_checkpoint()
+                            self._discover(course, point, allowed=names, targets=targets)
+            except Cancelled:
+                pass
+            finally:
+                with self.lock:
+                    self.discovery_threads.discard(threading.current_thread())
+                self.emit('discovery_done', None)
+        thread = threading.Thread(target=scan, name='progress-check', daemon=True)
+        with self.lock:
+            self.discovery_threads.add(thread)
+        thread.start()
+
+    def requeue(self, task_ids):
+        if not self.connected:
+            raise ValueError('请先登录，读取平台进度后再重新加入')
+        records = [self.store.task(tid) for tid in dict.fromkeys(task_ids)]
+        records = [r for r in records if r and r.get('lane') in ('video', 'answer', 'discovery')]
+        if not records:
+            raise ValueError('请勾选历史任务')
+        for record in records:
+            lane = self.lanes.get(record['lane'])
+            if record['id'] in self.manual or (lane and record['id'] in lane.pending):
+                raise ValueError('所选任务还有请求正在结束，请稍后重新加入')
+        names = set()
+        for record in records:
+            names.update(record.get('requested_lanes', ('video', 'answer')) if record['lane'] == 'discovery' else (record['lane'],))
+        self._ensure_lanes(names)
+        groups = {}
+        for record in records:
+            key = course_key(record['course']) + ':' + str(record['point']['id'])
+            groups.setdefault(key, (record['course'], record['point']))
+            self.excluded.discard(record['id'])
+            self.record(record, queue_removed=False, execution_state='checking', reason='正在读取平台进度')
+        self.discovery_stop.clear()
+        self._scan_async([(course, [point]) for course, point in groups.values()],
+                         names, {r['id'] for r in records})
 
     def _discovery_checkpoint(self):
         if self.discovery_stop.is_set():
@@ -134,43 +218,76 @@ class Engine:
         finally:
             self.emit('discovery_done', None)
 
-    def _discover(self, course, point, retry=0):
+    def _discover(self, course, point, retry=0, allowed=None, targets=None):
         key = course_key(course) + ':' + str(point['id'])
         task = {'id': key + ':discovery', 'lane': 'discovery', 'course': course, 'point': point}
+        previous_scan = self.store.task(task['id']) or {}
+        point_selected = targets is not None and task['id'] in targets
+        if point_selected:
+            allowed = set(previous_scan.get('requested_lanes', allowed or self.lanes))
+        limited_targets = None if point_selected else targets
         if task['id'] in self.excluded:
             return
         try:
+            self.record(task, status='running', execution_state='running', requested_lanes=sorted(allowed or self.lanes), reason='正在读取平台进度')
             jobs, info = self.platform.jobs(course, point)
+            self._discovery_checkpoint()
             if task['id'] in self.excluded:
                 return
             if info.get('notOpen'):
                 with self.discovery_guard:
-                    self.blocked[key] = (course, point, retry)
-                self.record(task, status='blocked', reason='章节未开放或等待前置任务')
+                    self.blocked[key] = (course, point, retry, allowed, targets)
+                self.record(task, status='blocked', execution_state='blocked', reason='章节未开放或等待前置任务')
+                for tid in targets or ():
+                    record = self.store.task(tid)
+                    if record and course_key(record['course']) == course_key(course) and str(record['point']['id']) == str(point['id']):
+                        self.record(record, status='blocked', execution_state='blocked', reason='章节未开放，保留历史结果')
                 return
             with self.discovery_guard:
                 self.blocked.pop(key, None)
-            self.record(task, status='done', reason='任务列表已读取')
+            self.record(task, status='done', execution_state='done', reason='任务列表已读取')
             for job in jobs:
                 lane_name = {'video': 'video', 'workid': 'answer'}.get(job['type'])
-                if lane_name not in self.lanes:
+                if lane_name not in self.lanes or (allowed is not None and lane_name not in allowed):
                     continue
                 work = {'id': key + ':' + str(job.get('jobid') or job.get('objectid')) + ':' + lane_name,
                         'lane': lane_name, 'course': course, 'point': point, 'job': job, 'info': info,
                         'owner': getattr(self.platform, 'uid', '')}
                 with self.lock:
                     old = self.store.task(work['id'])
-                    if work['id'] in self.excluded:
+                    if limited_targets is not None and work['id'] not in limited_targets:
+                        continue
+                    if work['id'] in self.excluded or (old and old.get('queue_removed') and (targets is None or work['id'] not in targets)):
                         continue
                     if old and old.get('status') in FINAL | UNCERTAIN:
-                        self.emit('task', old)
+                        self.record(old, execution_state='done', progress_checked_at=time.time(), queue_removed=False)
                         continue
-                    self.record(work, queue_removed=False)
-                    self.lanes[lane_name].put(work)
+                    self.record(work, queue_removed=False, progress_checked_at=time.time(), job=job, info=info)
+                    lane = self.lanes[lane_name]
+                    if lane.cancelled.is_set():
+                        self.record(work, status='failed', execution_state='failed', reason=lane.fault_reason or '本轮执行已结束，请重新加入')
+                    else:
+                        lane.put(work)
+            if targets:
+                present = {str(j.get('jobid') or j.get('objectid')) for j in jobs}
+                for tid in targets:
+                    record = self.store.task(tid)
+                    if not record or record.get('lane') == 'discovery' or course_key(record['course']) != course_key(course) or str(record['point']['id']) != str(point['id']):
+                        continue
+                    if tid in self.excluded:
+                        continue
+                    job_id = str(record['job'].get('jobid') or record['job'].get('objectid'))
+                    if job_id not in present:
+                        self.record(record, status='platform_done' if record['lane'] == 'answer' else 'done', execution_state='done',
+                                    remote_state='completed', queue_removed=False, progress_checked_at=time.time(), reason='平台已完成，进度已更新')
         except Cancelled:
             raise
         except Exception as exc:
-            self.record(task, status='failed', reason=str(exc))
+            self.record(task, status='failed', execution_state='failed', reason=str(exc))
+            for tid in targets or ():
+                record = self.store.task(tid)
+                if record and course_key(record['course']) == course_key(course) and str(record['point']['id']) == str(point['id']):
+                    self.record(record, status='failed', execution_state='failed', reason='读取平台进度失败：' + str(exc))
 
     def recheck_blocked(self):
         if not self.discovery_stop.is_set():
@@ -187,16 +304,19 @@ class Engine:
         def work():
             self.platform.bind(self._discovery_checkpoint)
             try:
-                for course, point, retry in blocked:
+                for course, point, retry, allowed, targets in blocked:
                     self._discovery_checkpoint()
-                    self._discover(course, point, retry + 1)
+                    self._discover(course, point, retry + 1, allowed, targets)
             except Cancelled:
                 pass
         self.discovery = threading.Thread(target=work, daemon=True)
         self.discovery.start()
 
     def run_video(self, task, checkpoint):
-        status = self.platform.video(task, checkpoint, lambda current, total: self.emit('progress', (task['id'], current, total)))
+        def progress(current, total):
+            self.record(task, progress={'current': current, 'total': total})
+            self.emit('progress', (task['id'], current, total))
+        status = self.platform.video(task, checkpoint, progress)
         if status == 'done':
             self.recheck_blocked()
         return status
@@ -259,6 +379,8 @@ class Engine:
             checkpoint()
         ready = summary({'document': document, 'rows': rows})['ready']
         auto = self.auto_submit and ready and not old.get('require_review')
+        if not auto and remote_state(self.store.task(task['id'])) == 'draft':
+            return 'draft'
         return self.save_or_submit(fresh, document, rows, auto)
 
     def save_or_submit(self, task, document, rows, submit, allow_blank=False):
@@ -292,19 +414,19 @@ class Engine:
 
     def _editable(self, record):
         if not record or record.get('lane') != 'answer':
-            raise ValueError('请选择答题章节')
+            raise ValueError('请选择一份测验')
         if record.get('status') in FINAL:
-            raise ValueError('该章节已交卷或平台已完成，不能修改或重复交卷')
+            raise ValueError('该测验已交卷或平台已完成')
         if record.get('status') in UNCERTAIN:
-            raise ValueError('该章节交卷结果尚不明确，请先核验这个章节')
+            raise ValueError('该测验交卷结果待确认，请先读取平台状态')
 
     def edit_answer(self, task_id, question_id, payload):
         mutex = self.mutex(task_id)
         if not mutex.acquire(blocking=False):
-            raise ValueError('该章节正在处理，请稍后编辑；其他章节不受影响')
+            raise ValueError('该测验正在处理，请稍后编辑')
         try:
             if task_id in self.manual:
-                raise ValueError('该章节正在批量操作，请稍后编辑')
+                raise ValueError('该测验正在批量操作，请稍后编辑')
             record = self.store.task(task_id)
             self._editable(record)
             rows = rows_for(record)
@@ -323,17 +445,18 @@ class Engine:
             raise ValueError('未知批量操作')
         ids = list(dict.fromkeys(task_ids))
         if not ids:
-            raise ValueError('请先选择章节或题目')
+            raise ValueError('请先勾选测验或题目')
         batch_id = uuid.uuid4().hex
         result = {'id': batch_id, 'action': action, 'time': time.time(), 'items': [], 'done': False}
         reserved = []
         with self.lock:
             for tid in ids:
                 if tid in self.manual:
-                    result['items'].append({'task_id': tid, 'result': 'skipped', 'reason': '这个章节已有批量操作'})
+                    result['items'].append({'task_id': tid, 'result': 'skipped', 'reason': '这份测验已有批量操作'})
                 else:
                     self.manual.add(tid)
                     self.manual_cancel[tid] = threading.Event()
+                    self.manual_action[tid] = action
                     reserved.append(tid)
             self.batch_threads.add(batch_id)
         self.emit('batch', copy.deepcopy(result))
@@ -347,7 +470,7 @@ class Engine:
                     acquired = mutex.acquire(blocking=False)
                     try:
                         if not acquired:
-                            raise ValueError('该章节正在执行；可等待或只移出该任务，其他章节继续')
+                            raise ValueError('该测验正在执行，已跳过；可在任务页取消后处理')
                         def checkpoint():
                             if self.manual_cancel[tid].is_set():
                                 raise TaskRemoved('选中的批量任务已停止，已有结果保留')
@@ -355,7 +478,7 @@ class Engine:
                         self.platform.bind(checkpoint)
                         record = self.store.task(tid)
                         if not record or record.get('lane') != 'answer':
-                            raise ValueError('不是答题章节，已跳过')
+                            raise ValueError('不是测验任务，已跳过')
                         item['label'] = record.get('course', {}).get('title', '') + ' / ' + record.get('point', {}).get('title', '')
                         if action == 'verify':
                             status = self._verify(record)
@@ -363,23 +486,25 @@ class Engine:
                             self._editable(record)
                             if action == 'redo':
                                 if api_fault:
-                                    raise ValueError('API 已暂停，未再次调用：' + api_fault)
+                                    raise ValueError('本轮 AI 操作已结束：' + api_fault)
                                 selected = (question_ids or {}).get(tid, [])
                                 if not selected:
-                                    raise ValueError('本章节没有选中的重做题目')
+                                    raise ValueError('这份测验没有选中的重做题目')
                                 status = self._redo(record, set(selected), checkpoint)
                             else:
                                 if action == 'submit' and not can_submit(record, allow_blank):
-                                    raise ValueError('本章节仍有异常题或没有可用答案；默认只提交完整正常的章节')
+                                    raise ValueError('这份测验仍有异常题或未答题，已跳过')
                                 fresh = self.fresh_task(record)
-                                if fresh is None:
+                                if action == 'save' and not needs_sync(record):
+                                    status = 'unchanged'
+                                elif fresh is None:
                                     self.record(record, status='platform_done', remote_state='completed', reason='平台显示任务已完成，无需重交')
                                     status = 'platform_done'
                                 else:
                                     status = self.save_or_submit(fresh, record['document'], rows_for(record), action == 'submit', allow_blank and action == 'submit')
                                     self.record(record, status=status)
                         final = self.store.task(tid)
-                        item.update(result='success' if status in ('draft', 'submitted', 'platform_done', 'review') else 'failed', reason=final.get('reason', ''), status=status)
+                        item.update(result='skipped' if status == 'unchanged' else 'success' if status in ('draft', 'submitted', 'platform_done', 'review') else 'failed', reason='草稿已同步，无新修改' if status == 'unchanged' else final.get('reason', ''), status=status)
                         if action == 'redo' and status == 'review' and any(row['error'] for row in rows_for(final) if row['question']['id'] in selected):
                             item['result'] = 'partial'
                     except (Cancelled, TaskRemoved) as exc:
@@ -387,9 +512,8 @@ class Engine:
                         item.update(result='cancelled', reason=str(exc))
                     except LaneFault as exc:
                         api_fault = str(exc)
-                        if 'answer' in self.lanes:
-                            self.lanes['answer'].pause()
-                        self.record({'id': tid}, reason='API 整体故障，答题暂停：' + api_fault)
+                        self.api_fault('answer', api_fault)
+                        self.record({'id': tid}, reason='本轮 AI 操作已结束：' + api_fault)
                         item.update(result='failed', reason=api_fault)
                     except Exception as exc:
                         item.update(result='failed' if acquired else 'skipped', reason=str(exc))
@@ -399,6 +523,7 @@ class Engine:
                         with self.lock:
                             self.manual.discard(tid)
                             self.manual_cancel.pop(tid, None)
+                            self.manual_action.pop(tid, None)
                     result['items'].append(item)
                     self.emit('batch', copy.deepcopy(result))
             finally:
@@ -494,12 +619,12 @@ class Engine:
                 self.record(record, status='removing' if running or event else 'removed',
                             queue_removed=True, previous_execution_state=record.get('execution_state', record.get('status')),
                             execution_state='removing' if running or event else 'removed',
-                            reason='已请求停止选中任务；正在结束当前请求' if running or event else '已移出当前队列，题目和答案保留')
+                            reason='正在取消，等待当前请求结束' if running or event else '任务已取消，题目和答案保留')
             else:
                 self.record(record, queue_removed=True)
 
     def busy(self):
-        if self.discovery and self.discovery.is_alive():
+        if (self.discovery and self.discovery.is_alive()) or any(t.is_alive() for t in list(self.discovery_threads)):
             return True
         return any(any(state in ('queued', 'running', 'removing', 'paused') for state in lane.states.values())
                    for lane in self.lanes.values() if not lane.cancelled.is_set())

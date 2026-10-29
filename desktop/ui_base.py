@@ -63,7 +63,7 @@ class BaseApp:
         style.configure('TButton', padding=(12, 7))
         style.configure('Accent.TButton', background='#1769c2', foreground='white')
         style.map('Accent.TButton', background=[('active', '#12569f')])
-        style.configure('Title.TLabel', font=('Microsoft YaHei UI', 22, 'bold'))
+        style.configure('Title.TLabel', font=('Microsoft YaHei UI', 18, 'bold'))
         style.configure('Muted.TLabel', foreground='#586b80')
         style.configure('Treeview', rowheight=29, background='white', fieldbackground='white')
         style.configure('Treeview.Heading', padding=7, font=('Microsoft YaHei UI', 10, 'bold'))
@@ -72,12 +72,12 @@ class BaseApp:
 
 
     def _build(self):
-        outer = ttk.Frame(self.root, padding=20)
+        outer = ttk.Frame(self.root, padding=16)
         outer.pack(fill='both', expand=True)
         header = ttk.Frame(outer)
         header.pack(fill='x', pady=(0, 14))
         ttk.Label(header, text='学习通工作台', style='Title.TLabel').pack(side='left')
-        ttk.Label(header, text='视频与答题独立推进  /  设置自动保存', style='Muted.TLabel').pack(side='left', padx=20)
+        ttk.Label(header, text='视频与答题独立执行', style='Muted.TLabel').pack(side='left', padx=20)
         self.connection = ttk.Label(header, text='尚未登录', style='Muted.TLabel', wraplength=340)
         self.connection.pack(side='right')
         self.notebook = ttk.Notebook(outer)
@@ -94,9 +94,9 @@ class BaseApp:
         settings_window = settings_canvas.create_window((0, 0), window=settings, anchor='nw')
         settings.bind('<Configure>', lambda event: settings_canvas.configure(scrollregion=settings_canvas.bbox('all')))
         settings_canvas.bind('<Configure>', lambda event: settings_canvas.itemconfigure(settings_window, width=event.width))
-        self.notebook.add(run, text='任务与进度')
-        self.notebook.add(review, text='答案审核')
-        self.notebook.add(settings_container, text='连接与设置')
+        self.notebook.add(run, text='任务')
+        self.notebook.add(review, text='答题')
+        self.notebook.add(settings_container, text='设置')
         self._settings(settings)
         def bind_scroll(widget):
             widget.bind('<MouseWheel>', lambda event: settings_canvas.yview_scroll(-int(event.delta / 120), 'units'))
@@ -105,7 +105,7 @@ class BaseApp:
         bind_scroll(settings)
         self._run(run)
         self._review(review)
-        self.notice = tk.StringVar(value='请先在「连接与设置」配置账号，点击登录并加载课程。')
+        self.notice = tk.StringVar(value='在“设置”登录后，点击“添加任务”选择课程。')
         banner = ttk.Frame(outer)
         banner.pack(fill='x', pady=(0, 10), before=self.notebook)
         self.error_details = ttk.Button(banner, text='错误详情', command=self.show_error, state='disabled')
@@ -113,14 +113,13 @@ class BaseApp:
         notice_label = ttk.Label(banner, textvariable=self.notice, style='Muted.TLabel', wraplength=900)
         notice_label.pack(side='left', fill='x', expand=True)
         banner.bind('<Configure>', lambda event: notice_label.configure(wraplength=max(300, event.width - 130)))
-        for var in self.vars.values():
-            var.trace_add('write', self.schedule_save)
 
 
     def variable(self, key, boolean=False):
         if key not in self.vars:
             factory = tk.BooleanVar if boolean else tk.StringVar
             self.vars[key] = factory(value=self.store.settings[key])
+            self.vars[key].trace_add('write', self.schedule_save)
         return self.vars[key]
 
 
@@ -144,15 +143,15 @@ class BaseApp:
         options = ttk.LabelFrame(parent, text='运行参数')
         options.grid(row=1, column=0, columnspan=2, sticky='ew')
         self.field(options, '视频并发', 'video_workers', 0)
-        self.field(options, '答题并发（章节数）', 'answer_workers', 0, column=2)
+        self.field(options, '答题并发（测验数）', 'answer_workers', 0, column=2)
         self.field(options, '视频倍速（1～2）', 'speed', 1)
         self.field(options, 'AI 请求超时（秒）', 'request_timeout', 1, column=2)
         self.field(options, 'AI 请求最小间隔（秒）', 'min_interval', 2)
-        ttk.Label(options, text='并发修改在下一次启动任务时生效。API 修改后点击恢复答题即可应用。', style='Muted.TLabel').grid(row=3, column=0, columnspan=4, sticky='w', pady=8)
+        ttk.Label(options, text='API 设置在下一次请求时应用；并发设置在下一轮任务中应用。', style='Muted.TLabel').grid(row=3, column=0, columnspan=4, sticky='w', pady=8)
         actions = ttk.Frame(parent)
         actions.grid(row=2, column=0, columnspan=2, sticky='ew', pady=12)
-        ttk.Button(actions, text='保存设置', command=lambda: self.save(True)).pack(side='left')
-        ttk.Button(actions, text='导入旧版配置目录', command=self.import_legacy).pack(side='left', padx=10)
+        ttk.Label(actions, text='设置自动保存', style='Muted.TLabel').pack(side='left', padx=(0, 18))
+        ttk.Button(actions, text='导入旧版配置', command=self.import_legacy).pack(side='left', padx=10)
         ttk.Button(actions, text='打开数据目录', command=lambda: os.startfile(self.store.directory)).pack(side='left')
         ttk.Label(parent, text=f'固定数据目录：{self.store.directory}\n升级只替换程序文件，设置、题目与记录独立保存。',
                   style='Muted.TLabel', wraplength=1000).grid(row=3, column=0, columnspan=2, sticky='w', pady=8)
@@ -184,6 +183,7 @@ class BaseApp:
                 raise ValueError('视频倍速应为 1～2，请求间隔应为 0～120 秒')
             values['geometry'] = self.root.geometry()
             self.store.save_settings(values)
+            self.engine.configure()
             if notify:
                 self.notice.set('设置已保存。')
             return True
@@ -209,7 +209,7 @@ class BaseApp:
         if not self.save(True) or self.connecting:
             return
         if self.engine.busy() or self.engine.manual:
-            messagebox.showinfo('任务运行中', '请先停止任务并等待当前请求结束，再切换登录账号。')
+            messagebox.showinfo('任务运行中', '请先取消当前任务，再切换登录账号。')
             return
         self.connecting = True
         self.login_button.configure(state='disabled')
@@ -218,27 +218,14 @@ class BaseApp:
         self.background(self.engine.connect, 'courses')
 
 
-    def pause(self, key):
-        if key in self.engine.lanes:
-            self.engine.lanes[key].pause()
-            self.notice.set(('视频' if key == 'video' else '答题') + '队列正在暂停；已发出的请求会先结束。')
-
-
-    def resume(self, key):
-        if self.save(True) and key in self.engine.lanes:
-            self.engine.configure()
-            self.engine.lanes[key].resume()
-            self.notice.set(('视频' if key == 'video' else '答题') + '队列已恢复。')
-
-
     def stop(self):
         self.engine.stop()
-        self.notice.set('正在停止并保留记录；等待已发出的网络请求结束。')
+        self.notice.set('正在取消本轮任务，已有结果保留在历史记录。')
 
 
     def import_legacy(self):
         if self.engine.busy() or self.engine.manual:
-            messagebox.showinfo('任务运行中', '请先停止任务，再导入旧版设置。')
+            messagebox.showinfo('任务运行中', '请先取消当前任务，再导入旧版设置。')
             return
         folder = filedialog.askdirectory(title='选择包含 config.ini / cookies.txt 的旧版目录')
         if not folder:

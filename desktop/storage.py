@@ -47,9 +47,10 @@ class Store:
         self.settings = dict(DEFAULTS, **self.get('settings'))
         # A crash during a POST must never turn into a blind automatic resubmission.
         for record in self.tasks():
-            if record.get('status') in ('running', 'submitting'):
+            if record.get('status') in ('queued', 'running', 'submitting', 'paused', 'removing', 'checking') or record.get('execution_state') in ('queued', 'running', 'removing', 'checking'):
                 previous = record['status']
-                record.update(status='unknown' if previous == 'submitting' else 'interrupted',
+                status = 'unknown' if previous == 'submitting' else previous if previous in ('draft', 'local_saved', 'review', 'submitted', 'platform_done') else 'interrupted'
+                record.update(status=status, execution_state='interrupted',
                               reason='上次运行中断；重新运行前会检查平台状态')
                 if previous == 'submitting':
                     record['remote_state'] = 'unknown'

@@ -127,17 +127,19 @@ class DesktopTests(unittest.TestCase):
         gate.set()
         until(lambda: len(engine.platform.writes) == 4)
 
-    def test_global_api_fault_pauses_only_answers_and_can_resume(self):
+    def test_global_api_fault_ends_answers_and_history_can_be_requeued(self):
         engine = self.engine()
         def fault(q, checkpoint):
             raise LaneFault('API Key 无效')
         engine.ai.query = fault
         engine.start(self.selections())
-        until(lambda: not engine.lanes['answer'].enabled.is_set())
+        until(lambda: engine.lanes['answer'].cancelled.is_set())
         until(lambda: len(engine.platform.videos) == 4)
         self.assertEqual(engine.platform.writes, [])
+        until(lambda: not engine.lanes['answer'].alive() and not engine.busy())
         engine.ai.query = self.success
-        engine.lanes['answer'].resume()
+        ids = [r['id'] for r in self.store.tasks() if r.get('lane') == 'answer']
+        engine.requeue(ids)
         until(lambda: len(engine.platform.writes) == 4)
 
     def test_failed_question_is_preserved_and_does_not_submit_or_block_next_chapter(self):

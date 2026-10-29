@@ -9,7 +9,7 @@ class Cancelled(Exception):
 
 
 class LaneFault(Exception):
-    """Configuration/billing fault that pauses only the affected lane."""
+    """Configuration/billing fault that ends the affected batch."""
 
 
 class TaskRemoved(Cancelled):
@@ -17,7 +17,7 @@ class TaskRemoved(Cancelled):
 
 
 class Lane:
-    def __init__(self, name, workers, handler, on_state=lambda *args: None, guard=None):
+    def __init__(self, name, workers, handler, on_state=lambda *args: None, guard=None, on_fault=lambda *args: None):
         self.name, self.handler, self.on_state = name, handler, on_state
         self.queue = Queue()
         self.enabled = threading.Event()
@@ -25,9 +25,12 @@ class Lane:
         self.cancelled = threading.Event()
         self.lock = threading.RLock()
         self.ids = set()
+        self.pending = set()
         self.states = {}
         self.threads = []
         self.guard = guard or (lambda task, checkpoint: nullcontext())
+        self.on_fault = on_fault
+        self.fault_reason = ''
         self.tokens = {}
         for n in range(workers):
             thread = threading.Thread(target=self._worker, name=f'{name}-{n}', daemon=True)
@@ -36,9 +39,12 @@ class Lane:
 
     def put(self, task):
         with self.lock:
-            if task['id'] in self.ids:
+            if self.cancelled.is_set():
+                return False
+            if task['id'] in self.pending:
                 return False
             self.ids.add(task['id'])
+            self.pending.add(task['id'])
             self.tokens[task['id']] = threading.Event()
             self._state(task, 'queued', '')
             self.queue.put(task)
@@ -52,9 +58,9 @@ class Lane:
     def checkpoint(self):
         while not self.enabled.wait(0.15):
             if self.cancelled.is_set():
-                raise Cancelled('任务已停止并保留')
+                raise Cancelled('本轮任务已取消')
         if self.cancelled.is_set():
-            raise Cancelled('任务已停止并保留')
+            raise Cancelled('本轮任务已取消')
 
     def pause(self):
         self.enabled.clear()
@@ -71,7 +77,9 @@ class Lane:
             except Empty:
                 break
             state = 'removed' if self.tokens[task['id']].is_set() else 'interrupted'
-            self._state(task, state, '未开始执行，已移出队列' if state == 'removed' else '未开始执行，已停止并保留')
+            self._state(task, state, '未开始执行，已取消' if state == 'removed' else '本轮执行已结束，结果已保留')
+            with self.lock:
+                self.pending.discard(task['id'])
             self.queue.task_done()
 
     def remove(self, task_id):
@@ -85,9 +93,9 @@ class Lane:
     def task_checkpoint(self, task):
         while True:
             if self.tokens[task['id']].is_set():
-                raise TaskRemoved('选中任务已移出队列，已有结果已保留')
+                raise TaskRemoved('任务已取消，已有结果已保留')
             if self.cancelled.is_set():
-                raise Cancelled('处理中已停止，已有结果已保留')
+                raise Cancelled('本轮执行已结束，已有结果已保留')
             if self.enabled.wait(.1):
                 return
 
@@ -116,18 +124,21 @@ class Lane:
                     self._state(task, result or 'done', '')
             except LaneFault as exc:
                 if self.tokens[task['id']].is_set():
-                    self._state(task, 'removed', '已移出队列，已有结果已保留')
+                    self._state(task, 'removed', '任务已取消，已有结果已保留')
                 else:
-                    self.pause()
-                    self._state(task, 'paused', str(exc))
-                    self.queue.put(task)
+                    self.fault_reason = str(exc)
+                    self._state(task, 'failed', str(exc))
+                    self.stop()
+                    self.on_fault(self.name, str(exc))
             except TaskRemoved as exc:
-                self._state(task, 'removed', ('处理中已移出，已有结果保留' if started else '未开始执行，已移出队列'))
+                self._state(task, 'removed', ('已取消，已有结果保留' if started else '未开始执行，已取消'))
             except Cancelled as exc:
                 self._state(task, 'interrupted', ('处理中已停止，已有结果保留' if started else '未开始执行，已停止并保留'))
             except Exception as exc:
                 self._state(task, 'failed', str(exc))
             finally:
+                with self.lock:
+                    self.pending.discard(task['id'])
                 self.queue.task_done()
 
     def alive(self):

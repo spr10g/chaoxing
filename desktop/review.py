@@ -73,6 +73,11 @@ def can_submit(record, allow_blank=False):
     return needs_review(record) and bool(quality['good']) and (quality['ready'] or allow_blank)
 
 
+def needs_sync(record):
+    """Only locally changed or unsuccessfully saved papers need a draft POST."""
+    return needs_review(record) and bool(summary(record)['good']) and remote_state(record) != 'draft'
+
+
 def changed_row(previous, question, result):
     history = copy.deepcopy(previous.get('history', [])) if previous else []
     if previous and (previous.get('payload') or previous.get('error')):

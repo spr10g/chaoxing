@@ -173,7 +173,7 @@ class AnswerService:
                         time.sleep(0.1)
                     continue
                 if status == 429:
-                    raise LaneFault('API 持续限流；调整并发或请求间隔后恢复') from None
+                    raise LaneFault('API 持续限流，请调整并发或请求间隔后重新加入任务') from None
                 # Never include server exception bodies, which may contain request credentials.
                 if isinstance(exc, (ValueError, json.JSONDecodeError)):
                     raise ValueError(str(exc)) from None

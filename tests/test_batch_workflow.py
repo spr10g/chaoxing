@@ -77,6 +77,7 @@ class BatchWorkflowTests(unittest.TestCase):
     def test_save_normal_answers_even_when_paper_contains_error(self):
         engine = self.engine()
         self.paper(engine, 'a', bad=True)
+        engine.record({'id': 'a'}, remote_state='draft_old')
         engine.batch('save', ['a'])
         self.finish_batch(engine)
         self.assertFalse(engine.platform.writes[0][1])
@@ -197,10 +198,10 @@ class BatchWorkflowTests(unittest.TestCase):
             app.engine.connected = True
             app.engine.chapters = lambda course: [{'id': '1', 'title': '1'}, {'id': '2', 'title': '2'}]
             captured = []
-            app.engine.start = lambda plan: captured.extend(plan)
-            app.choose_courses(True)
-            app.all_selected_chapters()
-            app.start()
+            app.engine.add = lambda plan: captured.extend(plan)
+            app.open_picker()
+            app.picker.select_all()
+            app.picker.start()
             deadline = time.monotonic() + 2
             while not captured and time.monotonic() < deadline:
                 root.update(); time.sleep(.01)
@@ -216,14 +217,16 @@ class BatchWorkflowTests(unittest.TestCase):
         root = tk.Tk(); app = App(root, self.store)
         try:
             self.assertEqual(len(app.review_tree.get_children()), 2)
+            app.question_filter.set('全部题目'); app.render_review()
             self.assertEqual(len(app.question_tree.get_children()), 4)
             app.question_filter.set('需处理'); app.render_review()
             self.assertEqual(len(app.question_tree.get_children()), 1)
             called = []
             app.engine.batch = lambda action, ids, *args: called.append((action, list(ids), args))
-            app.submit_all_ready()
+            app.paper_filter.set('可提交'); app.render_review()
+            app.paper_table.toggle_all(); app.paper_batch('submit')
             self.assertEqual(called[-1][1], ['a'])
-            app.redo_errors()
+            app.question_table.toggle_all(); app.redo_selected()
             self.assertEqual(called[-1][1], ['b'])
             self.assertEqual(called[-1][2][0], {'b': ['q2']})
         finally: app.close()

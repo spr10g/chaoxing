@@ -10,6 +10,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 $release = Join-Path $projectRoot "dist\ChaoxingDesktop-v$version-windows-x64"
 Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination (Join-Path $release 'LICENSE')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination (Join-Path $release 'README.md')
-Copy-Item -LiteralPath (Join-Path $projectRoot 'docs\USER_GUIDE.md') -Destination (Join-Path $release 'USER_GUIDE.md')
+Copy-Item -LiteralPath (Join-Path $projectRoot 'docs') -Destination (Join-Path $release 'docs') -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot 'CHANGELOG.md') -Destination (Join-Path $release 'CHANGELOG.md')
+Copy-Item -LiteralPath (Join-Path $projectRoot 'GLOSSARY.md') -Destination (Join-Path $release 'GLOSSARY.md')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'NOTICE.md') -Destination (Join-Path $release 'NOTICE.md')
 Write-Output "Built: $release"
