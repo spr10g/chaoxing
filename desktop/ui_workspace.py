@@ -73,7 +73,7 @@ class App(BaseApp):
         filters = ttk.Frame(parent); filters.pack(fill='x', pady=(0, 8))
         self.combo(filters, self.task_scope, ['当前任务', '历史记录', '全部任务'], self.render_all_tasks)
         self.combo(filters, self.task_kind, ['全部类型', '视频', '答题', '读取'], self.render_all_tasks, 10)
-        self.button(filters, '全选 / 清空', lambda: self.task_table.toggle_all())
+        self.task_delete_button = self.button(filters, '删除', lambda: self.delete_selected('tasks'))
         self.task_count = ttk.Label(filters, style='Muted.TLabel'); self.task_count.pack(side='right')
         self.task_table = CheckedTable(parent, ('course', 'content', 'kind', 'state', 'progress'),
                                       ('课程', '章节 / 内容', '类型', '执行状态', '进度'), self.task_selection,
@@ -95,7 +95,7 @@ class App(BaseApp):
         self.combo(qbar, self.question_filter, ['需处理', '全部题目', '正常题', '异常题', '未答题'], self.render_review, 12)
         self.redo_button = self.button(qbar, 'AI 重做', self.redo_selected, True)
         self.edit_button = self.button(qbar, '查看 / 修改', self.show_question)
-        self.button(qbar, '全选 / 清空', lambda: self.question_table.toggle_all())
+        self.question_delete_button = self.button(qbar, '删除', lambda: self.delete_selected('questions'))
         self.question_count = ttk.Label(qbar, style='Muted.TLabel'); self.question_count.pack(side='right')
         self.question_table = CheckedTable(questions, ('course', 'paper', 'title', 'answer', 'state'),
                                           ('课程', '章节 / 测验', '题目', '答案', '状态'), self.question_selection,
@@ -110,7 +110,7 @@ class App(BaseApp):
         menu = tk.Menu(self.paper_more, tearoff=False); self.paper_more.configure(menu=menu)
         menu.add_command(label='读取平台状态', command=lambda: self.paper_batch('verify'))
         menu.add_command(label='含未答题交卷', command=lambda: self.paper_batch('submit', True))
-        self.button(pbar, '全选 / 清空', lambda: self.paper_table.toggle_all())
+        self.paper_delete_button = self.button(pbar, '删除', lambda: self.delete_selected('papers'))
         self.paper_count = ttk.Label(pbar, style='Muted.TLabel'); self.paper_count.pack(side='right')
         self.paper_table = CheckedTable(papers, ('course', 'paper', 'counts', 'state', 'sync'),
                                        ('课程', '章节 / 测验', '正常 / 异常 / 总数', '答题状态', '平台草稿'), self.paper_selection,
@@ -134,6 +134,7 @@ class App(BaseApp):
         self.cancel_button.configure(state='normal' if active else 'disabled')
         self.requeue_button.configure(state='normal' if history and len(history) == len(ids) else 'disabled')
         self.task_detail_button.configure(state='normal' if len(ids) == 1 else 'disabled')
+        self.task_delete_button.configure(state='normal' if ids else 'disabled')
 
     def question_selection(self):
         if not hasattr(self, 'question_table'): return
@@ -142,6 +143,7 @@ class App(BaseApp):
         editable = any(needs_review(self.records[self.question_refs[i][0]]) for i in ids if i in self.question_refs)
         self.redo_button.configure(state='normal' if editable else 'disabled')
         self.edit_button.configure(state='normal' if len(ids) == 1 else 'disabled')
+        self.question_delete_button.configure(state='normal' if ids else 'disabled')
 
     def paper_selection(self):
         if not hasattr(self, 'paper_table'): return
@@ -150,6 +152,7 @@ class App(BaseApp):
         self.sync_button.configure(state='normal' if any(needs_sync(r) for r in records) else 'disabled')
         self.submit_button.configure(state='normal' if any(can_submit(r) for r in records) else 'disabled')
         self.paper_more.configure(state='normal' if records else 'disabled')
+        self.paper_delete_button.configure(state='normal' if records else 'disabled')
 
     def selection_counts(self):
         self.question_selection(); self.paper_selection()
@@ -164,6 +167,7 @@ class App(BaseApp):
         self.tasks_dirty = False
         rows = []
         for record in sorted(self.records.values(), key=lambda r: r.get('updated', 0), reverse=True):
+            if record.get('list_hidden', {}).get('tasks'): continue
             if record.get('lane') == 'discovery' and record.get('status') == 'done': continue
             active = self.is_active(record)
             if self.task_scope.get() == '当前任务' and not active: continue
@@ -183,6 +187,24 @@ class App(BaseApp):
         if not ids: return
         self.engine.remove_tasks(ids)
         self.notice.set(f'正在取消 {len(ids)} 项任务，结果保留在历史记录')
+
+    def delete_selected(self, view):
+        table = {'tasks': self.task_table, 'questions': self.question_table, 'papers': self.paper_table}[view]
+        selected = table.selected()
+        if not selected: return
+        questions = {}
+        if view == 'questions':
+            for iid in selected:
+                tid, qid = self.question_refs[iid]
+                questions.setdefault(tid, []).append(qid)
+            ids = list(questions)
+        else:
+            ids = selected
+        for record in self.engine.delete_list_items(view, ids, questions):
+            self.records[record['id']] = record
+        self.render_all_tasks(); self.render_review()
+        label = {'tasks': '任务', 'questions': '题目', 'papers': '测验'}[view]
+        self.notice.set(f'已从{label}列表删除 {len(selected)} 项，题目和答案已保留')
 
     def requeue_selected(self):
         ids = self.task_table.selected()
@@ -212,11 +234,13 @@ class App(BaseApp):
             include = (scope == '全部测验' or (scope == '待处理' and state != '已交卷') or
                        (scope == '待同步' and needs_sync(record)) or (scope == '可提交' and can_submit(record)) or
                        (scope == '有异常' and quality['errors']) or scope == state)
-            if include:
+            hidden = record.get('list_hidden', {})
+            if include and not hidden.get('papers'):
                 sync = '已同步' if record.get('remote_state') == 'draft' else '待同步' if needs_sync(record) else '—'
                 p_rows.append((tid, (record.get('course', {}).get('title', ''), location(record),
                                     f"{quality['good']} / {quality['errors']} / {quality['total']}", state, sync)))
             for row in rows_for(record):
+                if row['question']['id'] in hidden.get('questions', []): continue
                 qstate = question_state(row); qscope = self.question_filter.get()
                 if qscope == '需处理' and (not row['error'] or record.get('status') in FINAL): continue
                 if qscope in ('正常题', '异常题', '未答题') and qstate != qscope[:-1]: continue

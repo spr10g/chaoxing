@@ -152,6 +152,20 @@ class Engine:
         if not names:
             raise ValueError('请选择视频或 AI 答题')
         self._ensure_lanes(names)
+        chosen = {(course_key(course), str(point['id'])) for course, points in selections for point in points}
+        with self.lock:
+            records = [r for r in self.store.tasks()
+                       if (course_key(r.get('course', {})), str(r.get('point', {}).get('id'))) in chosen
+                       and r.get('lane') in names | {'discovery'}]
+            for record in records:
+                lane = self.lanes.get(record['lane'])
+                if ((lane and lane.states.get(record['id']) == 'removing') or
+                        (record['id'] in self.manual_cancel and self.manual_cancel[record['id']].is_set())):
+                    raise ValueError('所选任务正在取消，请等待当前请求结束后再添加')
+            for record in records:
+                self.excluded.discard(record['id'])
+                if record.get('list_hidden') or record.get('queue_removed'):
+                    self.record(record, list_hidden={}, queue_removed=False)
         self.discovery_stop.clear()
         self._scan_async(copy.deepcopy(selections), names, auto_submit=bool(self.store.settings['auto_submit']))
 
@@ -198,7 +212,7 @@ class Engine:
             key = course_key(record['course']) + ':' + str(record['point']['id'])
             groups.setdefault(key, (record['course'], record['point']))
             self.excluded.discard(record['id'])
-            self.record(record, queue_removed=False, execution_state='checking', reason='正在读取平台进度')
+            self.record(record, queue_removed=False, list_hidden={}, execution_state='checking', reason='正在读取平台进度')
         self.discovery_stop.clear()
         self._scan_async([(course, [point]) for course, point in groups.values()],
                          names, {r['id'] for r in records})
@@ -612,6 +626,31 @@ class Engine:
 
     def verify(self, task_id):
         return self.batch('verify', [task_id])
+
+    def delete_list_items(self, view, task_ids, question_ids=None):
+        """Remove selected list entries while retaining full forms and saved answers."""
+        if view not in ('tasks', 'papers', 'questions'):
+            raise ValueError('未知列表')
+        ids = list(dict.fromkeys(task_ids))
+        if view == 'tasks':
+            self.remove_tasks(ids)
+        changed = []
+        with self.lock:
+            for tid in ids:
+                record = self.store.task(tid)
+                if not record:
+                    continue
+                hidden = copy.deepcopy(record.get('list_hidden', {}))
+                if view == 'questions':
+                    valid = {r['question']['id'] for r in rows_for(record)}
+                    selected = set((question_ids or {}).get(tid, ())) & valid
+                    if not selected:
+                        continue
+                    hidden[view] = list(dict.fromkeys([*hidden.get(view, []), *sorted(selected)]))
+                else:
+                    hidden[view] = True
+                changed.append(self.record(record, list_hidden=hidden))
+        return changed
 
     def remove_tasks(self, task_ids):
         for tid in dict.fromkeys(task_ids):
