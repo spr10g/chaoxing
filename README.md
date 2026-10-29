@@ -72,7 +72,7 @@
 | `scripts/` | 构建脚本 |
 | `docs/` | 使用与开发文档 |
 
-环境安装、源码运行及打包命令见 [开发说明](docs/DEVELOPMENT.md)。
+环境安装、源码运行及打包命令见 [开发说明](docs/DEVELOPMENT.md)，新版本上传步骤见 [GitHub 发布说明](docs/RELEASING.md)。
 
 ## 许可与致谢
 
