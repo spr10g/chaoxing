@@ -21,7 +21,7 @@ class Engine:
         self.lanes = {}
         self.discovery = None
         self.discovery_threads = set()
-        self.scan_lock = threading.Lock()
+        self.scan_tail = None
         self.discovery_stop = threading.Event()
         self.lock = threading.RLock()
         self.discovery_guard = threading.RLock()
@@ -173,12 +173,9 @@ class Engine:
         mode = self.auto_submit if auto_submit is None else auto_submit
         def scan():
             try:
-                with self.scan_lock:
-                    self.platform.bind(self._discovery_checkpoint)
-                    for course, points in selections:
-                        for point in points:
-                            self._discovery_checkpoint()
-                            self._discover(course, point, allowed=names, targets=targets, auto_submit=mode)
+                if previous is not None:
+                    previous.join()
+                self._scan_batch(selections, names, targets, mode)
             except Cancelled:
                 pass
             finally:
@@ -187,8 +184,10 @@ class Engine:
                 self.emit('discovery_done', None)
         thread = threading.Thread(target=scan, name='progress-check', daemon=True)
         with self.lock:
+            previous = self.scan_tail if self.scan_tail and self.scan_tail.is_alive() else self.discovery
+            self.scan_tail = thread
             self.discovery_threads.add(thread)
-        thread.start()
+            thread.start()
 
     def requeue(self, task_ids):
         if not self.connected:
@@ -224,11 +223,7 @@ class Engine:
     def _discover_all(self, selections, auto_submit=None):
         mode = self.auto_submit if auto_submit is None else auto_submit
         try:
-            self.platform.bind(self._discovery_checkpoint)
-            for course, points in selections:
-                for point in points:
-                    self._discovery_checkpoint()
-                    self._discover(course, point, auto_submit=mode)
+            self._scan_batch(selections, None, None, mode)
         except Cancelled:
             pass
         except Exception as exc:
@@ -236,7 +231,32 @@ class Engine:
         finally:
             self.emit('discovery_done', None)
 
-    def _discover(self, course, point, retry=0, allowed=None, targets=None, auto_submit=None):
+    def _scan_batch(self, selections, names, targets, mode):
+        staged = []
+        self.platform.bind(self._discovery_checkpoint)
+        for course, points in selections:
+            for point in points:
+                self._discovery_checkpoint()
+                self._discover(course, point, allowed=names, targets=targets, auto_submit=mode, staged=staged)
+        self._discovery_checkpoint()
+        for scan_id, work in staged:
+            self._dispatch_discovered(scan_id, work)
+
+    def _dispatch_discovered(self, scan_id, work):
+        self._discovery_checkpoint()
+        with self.lock:
+            if scan_id in self.excluded or work['id'] in self.excluded:
+                return
+            lane = self.lanes[work['lane']]
+            if work['id'] in lane.pending or work['id'] in self.manual:
+                return
+            self.record(work, queue_removed=False, progress_checked_at=time.time(),
+                        job=work['job'], info=work['info'], auto_submit=work['auto_submit'])
+            if not lane.put(work):
+                self.record(work, status='failed', execution_state='failed',
+                            reason=lane.fault_reason or '本轮执行已结束，请重新加入')
+
+    def _discover(self, course, point, retry=0, allowed=None, targets=None, auto_submit=None, staged=None):
         key = course_key(course) + ':' + str(point['id'])
         task = {'id': key + ':discovery', 'lane': 'discovery', 'course': course, 'point': point}
         previous_scan = self.store.task(task['id']) or {}
@@ -295,12 +315,10 @@ class Engine:
                                                reason='平台仍返回待做任务，与交卷成功记录不一致，请稍后核实')
                             self.record(old, **changes)
                             continue
-                    self.record(work, queue_removed=False, progress_checked_at=time.time(), job=job, info=info, auto_submit=mode)
-                    lane = self.lanes[lane_name]
-                    if lane.cancelled.is_set():
-                        self.record(work, status='failed', execution_state='failed', reason=lane.fault_reason or '本轮执行已结束，请重新加入')
+                    if staged is None:
+                        self._dispatch_discovered(task['id'], work)
                     else:
-                        lane.put(work)
+                        staged.append((task['id'], work))
             if targets:
                 present = {str(j.get('jobid') or j.get('objectid')) for j in jobs}
                 for tid in targets:
@@ -337,7 +355,7 @@ class Engine:
             self.refresh_requested.set()
 
     def poll_recheck(self):
-        if not self.refresh_requested.is_set() or (self.discovery and self.discovery.is_alive()):
+        if not self.refresh_requested.is_set() or self.discovery_threads or (self.discovery and self.discovery.is_alive()):
             return
         self.refresh_requested.clear()
         with self.discovery_guard:

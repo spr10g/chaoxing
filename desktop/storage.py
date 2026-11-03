@@ -79,7 +79,7 @@ class Store:
     def save_task(self, record):
         with self.lock, self.db:
             record = dict(record, updated=time.time())
-            self.db.execute('INSERT OR REPLACE INTO tasks VALUES (?,?)',
+            self.db.execute('INSERT INTO tasks VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value',
                             (record['id'], json.dumps(record, ensure_ascii=False)))
 
     def task(self, task_id):
@@ -89,7 +89,7 @@ class Store:
 
     def tasks(self):
         with self.lock:
-            return [json.loads(row[0]) for row in self.db.execute('SELECT value FROM tasks')]
+            return [json.loads(row[0]) for row in self.db.execute('SELECT value FROM tasks ORDER BY rowid')]
 
     def import_legacy(self, folder, explicit=False):
         folder = Path(folder)

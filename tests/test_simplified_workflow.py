@@ -64,6 +64,32 @@ class ResumeTests(unittest.TestCase):
         self.assertIs(engine.lanes['video'], lane)
         self.assertEqual(engine.platform.videos, ['0', '1'])
 
+    def test_batch_waits_for_scan_then_dispatches_in_import_order(self):
+        self.store.save_settings({'answer': False, 'video_workers': 1})
+        engine = self.engine()
+        scanning, release = threading.Event(), threading.Event()
+        jobs = engine.platform.jobs
+
+        def scan(course, point):
+            if point['id'] == '1':
+                scanning.set()
+                release.wait(3)
+            return jobs(course, point)
+
+        engine.platform.jobs = scan
+        try:
+            engine.add(self.selections(2))
+            self.assertTrue(scanning.wait(2))
+            self.assertFalse(engine.lanes['video'].pending)
+            self.assertEqual(engine.platform.videos, [])
+        finally:
+            release.set()
+        until(lambda: not engine.busy())
+        self.assertEqual(engine.platform.videos, ['0', '1'])
+        ids = [r['id'] for r in self.store.tasks() if r['lane'] == 'video']
+        engine.record({'id': ids[0]}, reason='进度刷新')
+        self.assertEqual([r['id'] for r in self.store.tasks() if r['lane'] == 'video'], ids)
+
     def test_restarting_unchanged_draft_reads_progress_without_another_save(self):
         self.store.save_settings({'video': False})
         engine = self.engine(); engine.ai.query = self.success

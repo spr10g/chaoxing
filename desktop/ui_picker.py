@@ -19,7 +19,7 @@ class TaskPicker:
         self.courses = {course_key(c): c for c in app.courses}
         self.all_courses = set(app.store.settings.get('all_chapter_courses', [])) & self.courses.keys()
         self.selected = copy.deepcopy(app.store.settings.get('selections', {}))
-        self.active = set(app.store.settings.get('selected_courses', [])) & self.courses.keys()
+        self.active = dict.fromkeys(k for k in app.store.settings.get('selected_courses', []) if k in self.courses)
         outer = ttk.Frame(self.root, padding=16); outer.pack(fill='both', expand=True)
         bar = ttk.Frame(outer); bar.pack(fill='x', pady=(0, 8))
         ttk.Label(bar, text='勾选课程选择全部章节；展开课程可选择部分章节。').pack(side='left')
@@ -66,10 +66,10 @@ class TaskPicker:
         if hasattr(self, 'summary'): self.summary.configure(text=f'已选 {len(self.active)} 门课程')
 
     def select_all(self):
-        if self.active == set(self.courses) and self.all_courses == set(self.courses):
+        if self.active.keys() == self.courses.keys() and self.all_courses == set(self.courses):
             self.active.clear(); self.all_courses.clear()
         else:
-            self.active = set(self.courses); self.all_courses = set(self.courses)
+            self.active = dict.fromkeys(self.courses); self.all_courses = set(self.courses)
         self.render()
 
     def click(self, event):
@@ -78,16 +78,16 @@ class TaskPicker:
         if not iid: return
         if iid in self.courses:
             if iid in self.active:
-                self.active.discard(iid); self.all_courses.discard(iid)
+                self.active.pop(iid, None); self.all_courses.discard(iid)
             else:
-                self.active.add(iid); self.all_courses.add(iid)
+                self.active[iid] = None; self.all_courses.add(iid)
         elif '|loading' not in iid:
             key, pid = iid.rsplit('|', 1)
             chosen = {str(p['id']) for p in self.points.get(key, [])} if key in self.all_courses else set(self.selected.get(key, []))
             chosen.symmetric_difference_update({pid})
             self.all_courses.discard(key); self.selected[key] = sorted(chosen)
-            if chosen: self.active.add(key)
-            else: self.active.discard(key)
+            if chosen: self.active[key] = None
+            else: self.active.pop(key, None)
         self.render()
         return 'break'
 
@@ -115,9 +115,9 @@ class TaskPicker:
         if not self.app.save(True): return
         if not (self.app.store.settings['video'] or self.app.store.settings['answer']):
             self.app.notice.set('请选择视频或 AI 答题'); return
-        settings = {'selected_courses': sorted(self.active), 'all_chapter_courses': sorted(self.all_courses), 'selections': self.selected}
+        settings = {'selected_courses': list(self.active), 'all_chapter_courses': sorted(self.all_courses), 'selections': self.selected}
         self.app.store.save_settings(settings)
-        courses = [copy.deepcopy(self.courses[k]) for k in sorted(self.active)]
+        courses = [copy.deepcopy(self.courses[k]) for k in self.active]
         all_courses, selected = set(self.all_courses), copy.deepcopy(self.selected)
         self.start_button.configure(state='disabled')
         def resolve():

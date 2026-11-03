@@ -158,7 +158,7 @@ class App(BaseApp):
     def render_all_tasks(self):
         self.tasks_dirty = False
         rows = []
-        for record in sorted(self.records.values(), key=lambda r: r.get('updated', 0), reverse=True):
+        for record in self.records.values():
             if record.get('list_hidden', {}).get('tasks'): continue
             if record.get('lane') == 'discovery' and record.get('status') == 'done': continue
             active = self.is_active(record)
