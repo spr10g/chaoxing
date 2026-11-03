@@ -87,7 +87,7 @@ class Engine:
             reason = old.get('reason', '')
         if status == 'blocked' and not reason:
             reason = '章节未开放或等待前置任务'
-        execution = status if status in ('queued', 'running', 'checking', 'removing', 'removed', 'failed', 'blocked', 'interrupted') else 'done'
+        execution = status if status in ('queued', 'running', 'checking', 'removing', 'removed', 'failed', 'blocked', 'interrupted', 'video_unverified') else 'done'
         self.record(task, status=status, execution_state=execution, reason=reason)
         self.emit('counts', {key: lane.counts() for key, lane in self.lanes.items()})
 
@@ -318,8 +318,11 @@ class Engine:
                                 self.record(record, status='unknown', remote_state='unknown', execution_state='done',
                                             queue_removed=False, reason='任务列表未找到该测验，交卷结果待确认；本地草稿保留')
                         else:
-                            self.record(record, status='done', execution_state='done', queue_removed=False,
-                                        progress_checked_at=time.time(), reason='平台已完成，进度已更新')
+                            completed = job_id in info.get('completed_video_jobs', [])
+                            status = 'done' if completed else 'video_unverified'
+                            self.record(record, status=status, execution_state=status, queue_removed=False,
+                                        progress_checked_at=time.time(),
+                                        reason='平台已确认视频完成' if completed else '任务列表未找到视频，已保留进度，请稍后重新加入核实')
         except Cancelled:
             raise
         except Exception as exc:
@@ -359,6 +362,8 @@ class Engine:
         status = self.platform.video(task, checkpoint, progress)
         if status == 'done':
             self.recheck_blocked()
+        elif status == 'video_unverified':
+            self.record(task, reason='任务列表未找到视频，已保留进度，请稍后重新加入核实')
         return status
 
     def fresh_task(self, task):

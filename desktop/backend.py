@@ -76,7 +76,7 @@ class Platform:
             return 'blocked'
         job = next((j for j in jobs if j.get('jobid') == task['job'].get('jobid')), None)
         if job is None:
-            return 'done'
+            return 'done' if str(task['job'].get('jobid')) in info.get('completed_video_jobs', []) else 'video_unverified'
         speed = min(2.0, max(1.0, float(self.store.settings['speed'])))
         result = self.client.study_video(task['course'], job, info, _speed=speed, _type='Video')
         if result.is_failure():

@@ -193,6 +193,10 @@ def decode_course_card(html_text: str) -> Tuple[List[Dict[str, Any]], Dict[str, 
                                   if c.get('isPassed') in (True, 1, 'true')]
     job_info['pending_jobs'] = [str(c['jobid']) for c in work_cards
                                 if 'isPassed' in c and c['isPassed'] in (False, 0, 'false')]
+    job_info['completed_video_jobs'] = [
+        str(c['jobid']) for c in cards
+        if c.get('type') == 'video' and c.get('jobid') and c.get('isPassed') in (True, 1, 'true')
+    ]
     job_list = _process_attachment_cards(cards)
 
     return job_list, job_info

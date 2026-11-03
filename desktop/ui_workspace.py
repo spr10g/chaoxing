@@ -13,7 +13,7 @@ ACTIONS = {'verify': '核实交卷结果', 'save': '旧版草稿保存', 'submit
 ACTIVE = {'checking', 'queued', 'running', 'removing', 'blocked'}
 EXECUTION = {'checking': '读取进度', 'queued': '等待执行', 'running': '执行中', 'removing': '正在取消',
              'removed': '已取消', 'interrupted': '已取消', 'failed': '失败', 'blocked': '未开放',
-             'paused': '连接异常', 'done': '已完成'}
+             'paused': '连接异常', 'video_unverified': '待核实', 'done': '已完成'}
 
 
 def execution_state(record):

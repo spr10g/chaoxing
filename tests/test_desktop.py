@@ -376,6 +376,40 @@ class DesktopTests(unittest.TestCase):
         self.assertNotIn('document', self.store.task('uncertain'))
         self.assertEqual(engine.platform.writes, [])
 
+    def test_missing_video_requires_explicit_completion_evidence(self):
+        platform = Platform.__new__(Platform)
+        platform.check_owner = platform.bind = lambda *args: None
+        info = {'knowledgeid': 'chapter'}
+        platform.jobs = lambda *args: ([], info)
+        task = {'course': {}, 'point': {}, 'job': {'jobid': 'video-1'},
+                'progress': {'current': 30, 'total': 100}}
+        self.assertEqual(platform.video(task, lambda: None, lambda *args: None), 'video_unverified')
+        info['completed_video_jobs'] = ['video-1']
+        self.assertEqual(platform.video(task, lambda: None, lambda *args: None), 'done')
+
+    def test_video_does_not_accept_early_pass_or_report_end_at_start(self):
+        from api.base import StudyResult, SessionManager
+        from unittest.mock import patch
+        platform = Platform(self.store)
+        platform.client.get_fid = lambda: 'test-fid'
+        reported = []
+        clock = [0.0]
+        def report(*args, **kwargs):
+            reported.append((clock[0], args[6]))
+            return True, 200
+        def sleep(seconds):
+            clock[0] += seconds
+        platform.client.video_progress_log = report
+        response = SimpleNamespace(json=lambda: {'status': 'success', 'duration': 100,
+                                                   'dtoken': 'test', 'crc': '', 'key': ''})
+        session = SimpleNamespace(get=lambda *args, **kwargs: response)
+        with patch.object(SessionManager, 'get_session', return_value=session), patch('api.base.time.sleep', sleep), patch('api.base.time.time', lambda: clock[0]):
+            result = platform.client.study_video({}, {'objectid': 'test', 'playTime': 30000, 'name': 'test-video'}, {})
+        self.assertEqual(result, StudyResult.SUCCESS)
+        self.assertEqual(reported[0], (0, 30))
+        self.assertEqual(reported[-1][1], 100)
+        self.assertGreaterEqual(reported[-1][0], 70)
+
     def test_original_video_loop_releases_slot_when_final_reports_never_pass(self):
         from api.base import StudyResult, SessionManager
         from unittest.mock import patch

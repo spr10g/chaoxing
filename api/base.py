@@ -293,7 +293,10 @@ class Chaoxing:
                 return [], _job_info
 
             job_list += _job_list
-            job_info.update(_job_info)
+            if _job_info:
+                for key in ('completed_jobs', 'pending_jobs', 'completed_video_jobs'):
+                    _job_info[key] = job_info.get(key, []) + _job_info.get(key, [])
+                job_info.update(_job_info)
 
         if not job_list and not self.kwargs.get('discovery_only', False):
             self.study_emptypage(course, point)
@@ -490,7 +493,7 @@ class Chaoxing:
         # Time in the video (can be scaled with the speed factor): duration, play_time, last_log_time, wait_time
 
         duration = int(_video_info["duration"])
-        play_time = int(_job["playTime"]) // 1000
+        play_time = max(0, min(duration, int(_job["playTime"]) // 1000))
         last_log_time = 0
         last_iter = time.time()
         wait_time = int(random.uniform(30, 90))
@@ -504,12 +507,8 @@ class Chaoxing:
         max_forbidden_retry = 2
         terminal_attempts = 0
 
-        passed, state = self.video_progress_log(_session, _course, _job, _job_info, _dtoken, duration, play_time, _type,headers=headers)
-        passed, state = self.video_progress_log(_session, _course, _job, _job_info, _dtoken, duration, duration, _type, headers=headers)
-
-        if passed:
-            logger.info("任务瞬间完成: {}", _job['name'])
-            return StudyResult.SUCCESS
+        passed = False
+        last_log_time = play_time - wait_time
 
         while not passed:
             checkpoint_started = time.time()
@@ -521,6 +520,7 @@ class Chaoxing:
 
                 passed, state = self.video_progress_log(_session, _course, _job, _job_info, _dtoken, duration,
                                                         int(play_time), _type, headers=headers)
+                passed = bool(passed and state == 200 and play_time >= duration)
                 if play_time >= duration and not passed:
                     terminal_attempts += 1
                     if terminal_attempts >= 6:
@@ -542,7 +542,7 @@ class Chaoxing:
                         # FIXME: Maybe it should be considered an error if those keys aren't present in the refreshed meta, so we perhaps shouldn't use get()
                         _dtoken = refreshed_meta.get("dtoken", _dtoken)
                         _duration = refreshed_meta.get("duration", duration)
-                        play_time = refreshed_meta.get("playTime", play_time)
+                        play_time = max(0, min(duration, refreshed_meta.get("playTime", play_time)))
 
                         logger.debug("Refreshed token: {}, duration: {}, play time: {}", _dtoken, _duration, play_time)
                         continue
@@ -565,6 +565,7 @@ class Chaoxing:
             time.sleep(gc.THRESHOLD)
 
         logger.info("任务完成: {}", _job['name'])
+        pbar.close()
         return StudyResult.SUCCESS
 
     def study_document(self, _course, _job) -> StudyResult:
